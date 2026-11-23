@@ -17,6 +17,7 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parallelCatchingFlatMap
 import keiyoushi.utils.parallelCatchingFlatMapBlocking
@@ -24,8 +25,11 @@ import keiyoushi.utils.parseAs
 import keiyoushi.utils.useAsJsoup
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import okhttp3.CacheControl
 import okhttp3.FormBody
+import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
@@ -230,27 +234,24 @@ abstract class AnimesDigital :
     }
 
     // ============================ Video Links =============================
-    override fun hosterListParse(response: Response): List<Hoster> {
-        val document = response.useAsJsoup()
-        val player = document.selectFirst("div#player") ?: return emptyList()
-        return player.select("div.tab-video").flatMapIndexed { index, tab ->
-            val tabName = document.select("li[data-tab], a[href]")
-                .firstOrNull { (it.attr("data-tab").ifEmpty { it.attr("href") }) == "#${tab.id()}" }?.text()
-                ?.takeIf(String::isNotBlank) ?: "Server ${index + 1}"
-            tab.select(videoSelector).map { element ->
-                Hoster(
-                    hosterUrl = document.location(),
-                    hosterName = tabName,
-                    internalData = element.outerHtml(),
-                )
-            }
-        }
-    }
+    override fun hosterListParse(response: Response): List<Hoster> = parseHosters(response.useAsJsoup())
 
     override suspend fun getVideoList(hoster: Hoster): List<Video> {
-        val element = Jsoup.parse(hoster.internalData, hoster.hosterUrl)
-            .selectFirst(videoSelector) ?: return emptyList()
-        return videosFromElement(element)
+        val element = parseHosterElement(hoster) ?: return emptyList()
+        return resolveElement(
+            element = element,
+            baseUrl = baseUrl,
+            baseHeaders = headers,
+            fetchBlogger = { url, reqHeaders -> bloggerExtractor.videosFromUrl(url, reqHeaders) },
+            fetchEmbedDocument = { url, reqHeaders ->
+                client.get(
+                    url = url,
+                    headers = reqHeaders,
+                    cacheControl = CacheControl.FORCE_NETWORK,
+                ).useAsJsoup()
+            },
+            resolveProtectedUrl = protectorExtractor::embedUrlFromUrl,
+        )
     }
 
     override fun seasonListSelector() = throw UnsupportedOperationException()
@@ -258,33 +259,6 @@ abstract class AnimesDigital :
 
     private val protectorExtractor by lazy { ProtectorExtractor(client, headers) }
     private val bloggerExtractor by lazy { BloggerExtractor(client) }
-
-    private suspend fun videosFromElement(element: Element): List<Video> = when (element.tagName()) {
-        "iframe" -> videosFromEmbedUrl(element.absUrl("data-lazy-src").ifEmpty { element.absUrl("src") })
-
-        "script" -> ScriptExtractor.videosFromScript(element.data(), headers)
-
-        "a" -> protectorExtractor.embedUrlFromUrl(element.absUrl("href"))
-            ?.let { videosFromEmbedUrl(it) }
-            .orEmpty()
-
-        else -> emptyList()
-    }
-
-    private suspend fun videosFromEmbedUrl(url: String): List<Video> = when {
-        "blogger.com" in url -> bloggerExtractor.videosFromUrl(url, headers)
-        else -> {
-            client.newCall(GET(url, headers)).awaitSuccess()
-                .useAsJsoup()
-                .select(videoSelector)
-                .parallelCatchingFlatMap(::videosFromElement)
-        }
-    }
-
-    private val scriptSelectors = listOf("eval", "player.src", "this.src", "sources:")
-        .joinToString { "script:containsData($it):not(:containsData(/bg.mp4))" }
-
-    private val videoSelector = "iframe, a.ad-protected-cover, $scriptSelectors"
 
     // ============================== Settings ==============================
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
@@ -350,5 +324,108 @@ abstract class AnimesDigital :
         private const val PREF_QUALITY_TITLE = "Qualidade preferida"
         private const val PREF_QUALITY_DEFAULT = "720p"
         private val PREF_QUALITY_ENTRIES = arrayOf("360p", "480p", "720p")
+
+        private val SCRIPT_SELECTORS = listOf("eval", "player.src", "this.src", "sources:")
+            .joinToString { "script:containsData($it):not(:containsData(/bg.mp4))" }
+
+        internal val VIDEO_SELECTOR = "iframe, a.ad-protected-cover, $SCRIPT_SELECTORS"
+
+        internal fun parseHosters(document: Document): List<Hoster> {
+            val player = document.selectFirst("div#player") ?: return emptyList()
+            return player.select("div.tab-video").flatMapIndexed { index, tab ->
+                val tabName = document.select("li[data-tab], a[href]")
+                    .firstOrNull { (it.attr("data-tab").ifEmpty { it.attr("href") }) == "#${tab.id()}" }?.text()
+                    ?.takeIf(String::isNotBlank) ?: "Server ${index + 1}"
+                tab.select(VIDEO_SELECTOR).map { element ->
+                    Hoster(
+                        hosterUrl = document.location(),
+                        hosterName = tabName,
+                        internalData = element.outerHtml(),
+                    )
+                }
+            }
+        }
+
+        internal fun parseHosterElement(hoster: Hoster): Element? = Jsoup.parseBodyFragment(hoster.internalData, hoster.hosterUrl)
+            .selectFirst(VIDEO_SELECTOR)
+
+        internal fun embedHeadersFor(url: String, baseUrl: String, baseHeaders: Headers): Headers {
+            val targetHost = url.toHttpUrlOrNull()?.host
+            val baseHost = baseUrl.toHttpUrlOrNull()?.host
+            val fetchSite = if (targetHost != null && targetHost.equals(baseHost, ignoreCase = true)) {
+                "same-origin"
+            } else {
+                "cross-site"
+            }
+            return baseHeaders.newBuilder()
+                .set("Referer", "$baseUrl/")
+                .set("Sec-Fetch-Dest", "iframe")
+                .set("Sec-Fetch-Mode", "navigate")
+                .set("Sec-Fetch-Site", fetchSite)
+                .build()
+        }
+
+        internal suspend fun resolveElement(
+            element: Element,
+            baseUrl: String,
+            baseHeaders: Headers,
+            fetchBlogger: suspend (String, Headers) -> List<Video>,
+            fetchEmbedDocument: suspend (String, Headers) -> Document,
+            resolveProtectedUrl: suspend (String) -> String?,
+        ): List<Video> = when (element.tagName()) {
+            "iframe" -> resolveEmbedUrl(
+                url = element.absUrl("data-lazy-src").ifEmpty { element.absUrl("src") },
+                baseUrl = baseUrl,
+                baseHeaders = baseHeaders,
+                fetchBlogger = fetchBlogger,
+                fetchEmbedDocument = fetchEmbedDocument,
+                resolveProtectedUrl = resolveProtectedUrl,
+            )
+
+            "script" -> ScriptExtractor.videosFromScript(element.data(), baseHeaders)
+
+            "a" -> resolveProtectedUrl(element.absUrl("href"))
+                ?.let {
+                    resolveEmbedUrl(
+                        url = it,
+                        baseUrl = baseUrl,
+                        baseHeaders = baseHeaders,
+                        fetchBlogger = fetchBlogger,
+                        fetchEmbedDocument = fetchEmbedDocument,
+                        resolveProtectedUrl = resolveProtectedUrl,
+                    )
+                }
+                .orEmpty()
+
+            else -> emptyList()
+        }
+
+        internal suspend fun resolveEmbedUrl(
+            url: String,
+            baseUrl: String,
+            baseHeaders: Headers,
+            fetchBlogger: suspend (String, Headers) -> List<Video>,
+            fetchEmbedDocument: suspend (String, Headers) -> Document,
+            resolveProtectedUrl: suspend (String) -> String?,
+        ): List<Video> = when {
+            url.isBlank() -> emptyList()
+
+            "blogger.com" in url -> fetchBlogger(url, baseHeaders)
+
+            else -> {
+                fetchEmbedDocument(url, embedHeadersFor(url, baseUrl, baseHeaders))
+                    .select(VIDEO_SELECTOR)
+                    .parallelCatchingFlatMap {
+                        resolveElement(
+                            element = it,
+                            baseUrl = baseUrl,
+                            baseHeaders = baseHeaders,
+                            fetchBlogger = fetchBlogger,
+                            fetchEmbedDocument = fetchEmbedDocument,
+                            resolveProtectedUrl = resolveProtectedUrl,
+                        )
+                    }
+            }
+        }
     }
 }

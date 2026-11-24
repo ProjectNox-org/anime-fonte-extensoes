@@ -6,7 +6,7 @@ plugins {
 
 yuzono {
     name = "Kartoons"
-    versionCode = 4
+    versionCode = 5
     contentWarning = ContentWarning.SAFE
     libVersion = "16"
 
@@ -26,8 +26,4 @@ yuzono {
         path("/show/..*")
         path("/movie/..*")
     }
-}
-
-dependencies {
-    implementation(project(":lib:playlistutils"))
 }

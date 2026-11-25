@@ -1,9 +1,9 @@
 {
-  "upstream_sha": "6091b66d634e8a00ea6fc47436029fb50ec40e07",
-  "last_validated_upstream_sha": "6091b66d634e8a00ea6fc47436029fb50ec40e07",
+  "upstream_sha": "ad058aaf9cf99c4eed74a8cd6cff7b9ec3ec52eb",
+  "last_validated_upstream_sha": "ad058aaf9cf99c4eed74a8cd6cff7b9ec3ec52eb",
   "upstream_branch": "master",
-  "synced_at": "2026-11-24T20:40:12.677492+00:00",
-  "base_sha": "2a3947816b548283b81bede8ccd4a3043a407b61",
+  "synced_at": "2026-11-25T13:34:15.579491+00:00",
+  "base_sha": "6091b66d634e8a00ea6fc47436029fb50ec40e07",
   "sync_status": "VALIDATED",
   "blocked_candidate": null,
   "publication_block": null

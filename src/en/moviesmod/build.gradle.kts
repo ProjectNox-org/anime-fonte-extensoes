@@ -6,7 +6,7 @@ plugins {
 
 yuzono {
     name = "MoviesMod"
-    versionCode = 10
+    versionCode = 11
     contentWarning = ContentWarning.SAFE
     libVersion = "16"
 
@@ -18,5 +18,6 @@ yuzono {
 }
 
 dependencies {
+    implementation(project(":lib:drivelinkresolver"))
     implementation(project(":lib:playlistutils"))
 }

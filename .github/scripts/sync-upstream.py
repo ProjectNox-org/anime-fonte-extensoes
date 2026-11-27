@@ -205,19 +205,91 @@ def is_preserved(path: str) -> bool:
 
 
 
-def get_ptbr_snapshot(ref: str | None = None) -> dict[str, str]:
-    """Capture sha256 checksum of every source/config file in src/pt/**."""
+def _resolve_default_upstream_ref() -> str | None:
+    for candidate in (f"{UPSTREAM_REMOTE}/{UPSTREAM_BRANCH}", f"{UPSTREAM_REMOTE}/master", f"{UPSTREAM_REMOTE}/main"):
+        res = subprocess.run(["git", "rev-parse", "--verify", candidate], capture_output=True, text=True, check=False)
+        if res.returncode == 0:
+            return candidate
+    return None
+
+
+def unit_has_nox_code_customization(
+    unit: str,
+    upstream_ref: str,
+    local_ref: str = "HEAD",
+) -> bool:
+    """Return True when unit has local code/resource edits outside build.gradle* that are absent from upstream history."""
+    if not path_exists(local_ref, unit):
+        return False
+    if not path_exists(upstream_ref, unit):
+        return True
+    revisions = git("log", "-n", "30", "--format=%H", upstream_ref, "--", unit, check=False).splitlines()
+    for rev in revisions:
+        changed = git(
+            "diff", "--name-only", rev, local_ref, "--", unit,
+            ":(exclude)*/build.gradle.kts", ":(exclude)*/build.gradle",
+            check=False,
+        ).splitlines()
+        if not changed:
+            return False
+    return True
+
+
+def is_ptbr_unit_protected(
+    unit: str,
+    upstream_ref: str | None = None,
+    base: str | None = None,
+    explicit_delete_protections: list[str] | None = None,
+) -> bool:
+    """Return True if a PT-BR unit has Nox protection/customization or was deleted upstream; False for unmodified/new upstream PT-BR units."""
+    if not is_ptbr_unit(unit):
+        return False
+    explicit = set(EXPLICIT_LOCKED_UNITS) | set(
+        explicit_delete_protections
+        if explicit_delete_protections is not None
+        else get_explicit_delete_protections()
+    )
+    if unit in explicit:
+        return True
+    ref = upstream_ref or _resolve_default_upstream_ref()
+    if ref is None:
+        return True
+    has_local = path_exists("HEAD", unit) or Path(unit).is_dir()
+    has_up = path_exists(ref, unit)
+    if not has_local and has_up:
+        return False
+    if has_local and not has_up:
+        return True
+    return unit_has_nox_code_customization(unit, ref)
+
+
+def get_ptbr_snapshot(
+    ref: str | None = None,
+    units: set[str] | list[str] | None = None,
+) -> dict[str, str]:
+    """Capture sha256 checksum of source/config files for protected src/pt/** units."""
     snapshot: dict[str, str] = {}
+    target_units = sorted(set(units)) if units is not None else None
     if ref is None:
         pt_dir = Path("src/pt")
         if not pt_dir.is_dir():
             return snapshot
-        for p in sorted(pt_dir.rglob("*")):
-            if p.is_file():
-                rel_parts = p.relative_to(pt_dir).parts
-                if any(part in {"build", ".cxx", ".gradle", ".kotlin"} for part in rel_parts):
-                    continue
-                snapshot[p.as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
+        if target_units is None:
+            up_ref = _resolve_default_upstream_ref()
+            target_units = [
+                f"src/pt/{d.name}" for d in sorted(pt_dir.iterdir())
+                if d.is_dir() and is_ptbr_unit_protected(f"src/pt/{d.name}", up_ref)
+            ]
+        for unit in target_units:
+            u_dir = Path(unit)
+            if not u_dir.is_dir():
+                continue
+            for p in sorted(u_dir.rglob("*")):
+                if p.is_file():
+                    rel_parts = p.relative_to(u_dir).parts
+                    if any(part in {"build", ".cxx", ".gradle", ".kotlin"} for part in rel_parts):
+                        continue
+                    snapshot[p.as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
     else:
         out = git("ls-tree", "-r", ref, "src/pt", check=False)
         for line in out.splitlines():
@@ -225,13 +297,18 @@ def get_ptbr_snapshot(ref: str | None = None) -> dict[str, str]:
             if len(parts) >= 4:
                 sha = parts[2]
                 path = parts[3]
-                snapshot[path] = sha
+                unit = "/".join(path.split("/")[:3])
+                if target_units is None or unit in target_units:
+                    snapshot[path] = sha
     return snapshot
 
 
-def verify_ptbr_unchanged(pre_snapshot: dict[str, str]) -> None:
-    """Verify that src/pt/** has EXACTLY zero alterations."""
-    post_snapshot = get_ptbr_snapshot(None)
+def verify_ptbr_unchanged(
+    pre_snapshot: dict[str, str],
+    units: set[str] | list[str] | None = None,
+) -> None:
+    """Verify that protected/customized src/pt/** units have EXACTLY zero alterations."""
+    post_snapshot = get_ptbr_snapshot(None, units=units)
     if pre_snapshot != post_snapshot:
         added = sorted(set(post_snapshot.keys()) - set(pre_snapshot.keys()))
         removed = sorted(set(pre_snapshot.keys()) - set(post_snapshot.keys()))
@@ -243,7 +320,7 @@ def verify_ptbr_unchanged(pre_snapshot: dict[str, str]) -> None:
             errors.append(f"removed {len(removed)} files: {removed[:5]}")
         if modified:
             errors.append(f"modified {len(modified)} files: {modified[:5]}")
-        msg = f"CRITICAL: PT-BR protection violated during sync! Alterations detected: {'; '.join(errors)}"
+        msg = f"CRITICAL: Protected PT-BR protection violated during sync! Alterations detected: {'; '.join(errors)}"
         print(f"::error::{msg}", file=sys.stderr)
         raise RuntimeError(msg)
 
@@ -328,15 +405,20 @@ def get_explicit_delete_protections() -> list[str]:
 
 def get_explicit_code_protections(
     explicit_delete_protections: list[str] | None = None,
+    upstream_ref: str | None = None,
 ) -> set[str]:
-    """Return all explicitly protected units, universally including all local PT-BR sources."""
+    """Return explicitly protected units plus customized/Nox-only/removed PT-BR sources."""
     base_list = (
         explicit_delete_protections
         if explicit_delete_protections is not None
         else get_explicit_delete_protections()
     )
-    pt_local = {u for u in get_all_source_units(None) if is_ptbr_unit(u)}
-    return set(base_list) | set(EXPLICIT_LOCKED_UNITS) | pt_local
+    ref = upstream_ref or _resolve_default_upstream_ref()
+    pt_protected = {
+        u for u in get_all_source_units(None)
+        if is_ptbr_unit(u) and is_ptbr_unit_protected(u, ref, explicit_delete_protections=base_list)
+    }
+    return set(base_list) | set(EXPLICIT_LOCKED_UNITS) | pt_protected
 
 
 
@@ -570,18 +652,18 @@ def classify_sync_units(
     candidates = upstream_set | main_set | all_upstream | all_local
     historically_upstream = upstream_historical_units(upstream_ref)
     
-    explicitly_protected = get_explicit_code_protections(explicit_delete_protections)
+    explicitly_protected = get_explicit_code_protections(explicit_delete_protections, upstream_ref=upstream_ref)
 
-    # Missing foreign units that exist upstream but not locally:
+    # Missing units that exist upstream (including new PT-BR units) but not locally:
     missing_foreign = {
         u for u in all_upstream
-        if not is_ptbr_unit(u) and not path_exists("HEAD", u)
+        if u not in explicitly_protected and not path_exists("HEAD", u)
     }
 
-    # Divergent foreign units present in both whose functional contents differ:
+    # Divergent unprotected units present in both whose functional contents differ:
     divergent_foreign = set()
     for u in all_upstream & all_local:
-        if is_ptbr_unit(u):
+        if u in explicitly_protected:
             continue
         # Expected divergence: if the local unit matches upstream except versionCode
         if unit_matches_ref_except_version_code(u, upstream_ref, "HEAD"):
@@ -604,6 +686,7 @@ def classify_sync_units(
         and (path_exists(base, unit) or unit in historically_upstream)
     }
 
+    # All upstream deletions of src/pt/** remain shielded unless explicitly opted out
     deleted_protected = sorted({
         u for u in deleted
         if is_ptbr_unit(u) or u in explicitly_protected
@@ -617,7 +700,7 @@ def classify_sync_units(
 
     # Conflicts: units with concurrent edits between base and HEAD
     conflicts = sorted(((upstream_set & main_set) | protected_updates) - deleted)
-    upstream_only = sorted((set(upstream_units) | missing_foreign | divergent_foreign) - set(conflicts) - deleted - {u for u in candidates if is_ptbr_unit(u)})
+    upstream_only = sorted((set(upstream_units) | missing_foreign | divergent_foreign) - set(conflicts) - deleted - explicitly_protected)
     nox_only = sorted(main_set - upstream_set - deleted)
     return upstream_only, conflicts, nox_only, deleted_remove, deleted_protected
 
@@ -635,29 +718,37 @@ def pending_sync_units(
 
     all_upstream = get_all_source_units(upstream_ref)
     all_local = get_all_source_units("HEAD")
-    explicit_protected = set(protected_units) | get_explicit_code_protections()
+    explicit_protected = set(protected_units) | get_explicit_code_protections(upstream_ref=upstream_ref)
 
     pending: set[str] = set()
 
-    # 1. Missing foreign units in local (added upstream)
+    # 1. Missing units in local (added upstream, including new src/pt/* units)
     for u in all_upstream - all_local:
-        if not is_ptbr_unit(u) and u not in explicit_protected:
+        if u not in explicit_protected:
             pending.add(u)
 
-    # 2. Stale foreign units in local (removed upstream)
+    # 2. Stale non-PTBR units in local (removed upstream; PT-BR deletions stay shielded)
     for u in all_local - all_upstream:
         if not is_ptbr_unit(u) and u not in explicit_protected and not is_nox_exclusive(u, upstream_ref, base=base):
             pending.add(u)
 
-    # 3. If upstream has commits not yet merged into HEAD, inspect changed units
+    # 3. Unprotected units whose code diverges from upstream (e.g. formerly frozen src/pt/* units even after ours-merge)
+    for u in all_upstream & all_local:
+        if u in explicit_protected or is_ptbr_unit_protected(u, upstream_ref, base=base):
+            continue
+        if not unit_matches_ref_except_version_code(u, upstream_ref, "HEAD"):
+            if local_version_ahead_of_upstream(u, upstream_ref) is None or has_newer_upstream_for_version_only_unit(u, upstream_ref):
+                pending.add(u)
+
+    # 4. If upstream has commits not yet merged into HEAD, inspect changed units
     if base != upstream_head:
         upstream_diff_entries = changed_entries(base, upstream_ref)
         upstream_diff_units, _ = collect_units(upstream_diff_entries)
         for u in upstream_diff_units:
-            if not is_ptbr_unit(u) and u not in explicit_protected:
+            if u not in explicit_protected:
                 pending.add(u)
         for unit in diff_units:
-            if is_ptbr_unit(unit) or unit in explicit_protected or is_nox_exclusive(unit, upstream_ref, base=base):
+            if unit in explicit_protected or is_nox_exclusive(unit, upstream_ref, base=base):
                 continue
             if not path_exists(upstream_ref, unit):
                 continue
@@ -780,14 +871,22 @@ def detect_indirect_impacts(upstream_units: list[str]) -> set[str]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def fetch_deployed_version_codes() -> dict[str, int]:
-    """Fetch currently deployed extension codes from distribution repo with multi-source fallback."""
-    candidate_sources = [
+def fetch_deployed_version_codes(
+    catalog_file: str | None = None,
+    distribution_dir: str | None = None,
+) -> dict[str, int]:
+    """Fetch currently deployed extension codes from local catalog/dist or remote repo."""
+    candidate_sources: list[tuple[str, str]] = []
+    if catalog_file:
+        candidate_sources.append(("file", catalog_file))
+    if distribution_dir:
+        candidate_sources.append(("file", str(Path(distribution_dir) / "index.min.json")))
+    candidate_sources.extend([
         ("url", "https://raw.githubusercontent.com/ProjectNox-org/anime-extensoes/repo/index.min.json"),
         ("url", "https://cdn.jsdelivr.net/gh/ProjectNox-org/anime-extensoes@repo/index.min.json"),
         ("file", str(Path(__file__).resolve().parents[3] / "anime-extensoes/index.min.json")),
         ("file", str(Path(__file__).resolve().parents[2] / "../anime-extensoes/index.min.json")),
-    ]
+    ])
     for kind, target in candidate_sources:
         try:
             raw = None
@@ -845,7 +944,7 @@ def bump_version_if_needed(
     - Case E (libVersion upgrade): If upstream libVersion > local libVersion, upgrade libVersion.
     - Case F (Indirect library update): If shared lib changed, bump to max(disk_eff + 1, deployed_code + 1).
     """
-    if is_ptbr_unit(unit):
+    if is_protected and is_ptbr_unit(unit):
         return None
 
     local = pre_sync_effective if pre_sync_effective is not None else effective_version(None, unit)
@@ -1863,8 +1962,19 @@ def _apply_units_inner(
     deployed_codes = deployed_codes or {}
     base = git("merge-base", "HEAD", upstream_ref).strip()
 
-    # Pre-sync PT-BR snapshot to verify zero alterations
-    pre_ptbr_snapshot = get_ptbr_snapshot(None)
+    explicit_protection_set_pre = (
+        set(protected_deletions or [])
+        | get_explicit_code_protections(upstream_ref=upstream_ref)
+    )
+    protected_ptbr_units = {
+        u for u in get_all_source_units("HEAD")
+        if is_ptbr_unit(u) and (
+            u in explicit_protection_set_pre
+            or is_ptbr_unit_protected(u, upstream_ref, base=base)
+        )
+    }
+    # Pre-sync snapshot for protected/customized PT-BR units to verify zero alterations
+    pre_ptbr_snapshot = get_ptbr_snapshot(None, units=protected_ptbr_units)
 
     pre_sync_effective: dict[str, tuple[int, int, int]] = {}
     pre_sync_lib: dict[str, int] = {}
@@ -1878,15 +1988,19 @@ def _apply_units_inner(
 
     deleted_set = set(upstream_deleted or [])
     deletion_protection_set = set(protected_deletions or [])
-    explicit_protection_set = deletion_protection_set | get_explicit_code_protections()
+    explicit_protection_set = (
+        deletion_protection_set
+        | protected_ptbr_units
+        | get_explicit_code_protections(upstream_ref=upstream_ref)
+    )
     deferred_units = set((deferred_incompatibilities or {}).keys())
 
     for unit in units_to_apply:
         if unit in deferred_units:
             print(f"Deferring incompatible unit (preserving last functional state): {unit}")
             continue
-        if is_ptbr_unit(unit):
-            print(f"Preserving untouchable PT-BR unit: {unit}")
+        if is_ptbr_unit(unit) and unit in protected_ptbr_units:
+            print(f"Preserving protected/customized PT-BR unit: {unit}")
             continue
         if unit in deletion_protection_set:
             print(f"Preserving explicitly protected upstream deletion: {unit}")
@@ -1903,8 +2017,8 @@ def _apply_units_inner(
             continue
 
         if unit in protected:
-            if is_ptbr_unit(unit):
-                print(f"Preserving untouchable PT-BR unit on conflict: {unit}")
+            if is_ptbr_unit(unit) and unit in protected_ptbr_units:
+                print(f"Preserving protected PT-BR unit on conflict: {unit}")
                 continue
             # Explicitly protected unit with upstream changes
             up_lib = read_lib_version(upstream_ref, unit)
@@ -1939,9 +2053,9 @@ def _apply_units_inner(
         {
             u for u in units_to_apply
             if u.startswith("src/")
-            and not is_ptbr_unit(u)
             and u not in explicit_protection_set
             and u not in deferred_units
+            and u not in deleted_set
         }
     )
 
@@ -1997,8 +2111,8 @@ def _apply_units_inner(
     save_sync_state(sync_state)
     git("add", "--", str(SYNC_STATE_FILE))
 
-    # Verify PT-BR snapshot integrity: MUST be 100% byte-for-byte identical
-    verify_ptbr_unchanged(pre_ptbr_snapshot)
+    # Verify protected/customized PT-BR snapshot integrity: MUST be 100% byte-for-byte identical
+    verify_ptbr_unchanged(pre_ptbr_snapshot, units=protected_ptbr_units)
 
     git("diff", "--check")
 
@@ -2967,10 +3081,11 @@ def main() -> None:
     diff_units, _ = collect_units(diff_entries)
     effective_diff = pending_sync_units(diff_units, protected, upstream_ref, base=base)
 
+    explicit_prot_main = get_explicit_code_protections(explicit_delete_protections, upstream_ref=upstream_ref)
     if effective_diff:
         print(f"Notice: Main tree has {len(effective_diff)} pending inventory/upstream updates.")
         upstream_units = sorted(set(upstream_units) | set(effective_diff))
-        upstream_only = sorted((set(upstream_only) | set(effective_diff)) - conflict_set - set(upstream_deleted) - set(protected_deletions) - {u for u in effective_diff if is_ptbr_unit(u)})
+        upstream_only = sorted((set(upstream_only) | set(effective_diff)) - conflict_set - set(upstream_deleted) - set(protected_deletions) - explicit_prot_main)
 
     indirect = detect_indirect_impacts(upstream_units)
 
@@ -2981,9 +3096,9 @@ def main() -> None:
         upstream_deleted, protected_deletions,
     )
 
-    new_units = [u for u in upstream_only if not path_exists(base, u)]
-    indirect_clean = sorted({u for u in indirect if not is_ptbr_unit(u) and path_exists("HEAD", u)})
-    updated_units = sorted(set([u for u in upstream_only if path_exists(base, u)] + conflict_units) | set(indirect_clean))
+    new_units = [u for u in upstream_only if not path_exists("HEAD", u)]
+    indirect_clean = sorted({u for u in indirect if u not in explicit_prot_main and path_exists("HEAD", u)})
+    updated_units = sorted(set([u for u in upstream_only if path_exists("HEAD", u)] + conflict_units) | set(indirect_clean))
     removed_units = sorted({u for u in upstream_deleted if not is_ptbr_unit(u) and u not in protected_deletions})
 
     infra_paths_in_diff = {
@@ -3202,7 +3317,10 @@ def main() -> None:
         print_observability_footer("SUCCESS", "SKIPPED", "SKIPPED")
         return
 
-    deployed_codes = fetch_deployed_version_codes()
+    deployed_codes = fetch_deployed_version_codes(
+        catalog_file=args.catalog_file,
+        distribution_dir=args.distribution_dir,
+    )
     deferred_incompats = load_deferred_incompatibilities()
     units_to_apply = sorted(
         set(upstream_units)
@@ -3215,7 +3333,7 @@ def main() -> None:
     validation_units = sorted(
         {
             u for u in (set(new_units) | set(updated_units) | set(indirect_clean))
-            if u.startswith("src/") and not is_ptbr_unit(u) and u not in set(removed_units)
+            if u.startswith("src/") and u not in explicit_prot_main and u not in set(removed_units)
         }
     )
 

@@ -35,6 +35,36 @@ def _source_url(value):
     return value
 
 
+def _resolve_content_warning(item, package_name, nsfw):
+    raw_cw = item.get("contentWarning")
+    if raw_cw is None:
+        return (
+            index_pb2.CONTENT_WARNING_NSFW
+            if nsfw == 1
+            else index_pb2.CONTENT_WARNING_SAFE
+        )
+    if isinstance(raw_cw, str):
+        mapping = {
+            "SAFE": index_pb2.CONTENT_WARNING_SAFE,
+            "CONTENT_WARNING_SAFE": index_pb2.CONTENT_WARNING_SAFE,
+            "MIXED": index_pb2.CONTENT_WARNING_MIXED,
+            "CONTENT_WARNING_MIXED": index_pb2.CONTENT_WARNING_MIXED,
+            "NSFW": index_pb2.CONTENT_WARNING_NSFW,
+            "CONTENT_WARNING_NSFW": index_pb2.CONTENT_WARNING_NSFW,
+        }
+        key = raw_cw.strip().upper()
+        if key in mapping:
+            return mapping[key]
+    elif isinstance(raw_cw, int) and not isinstance(raw_cw, bool):
+        if raw_cw in (
+            index_pb2.CONTENT_WARNING_SAFE,
+            index_pb2.CONTENT_WARNING_MIXED,
+            index_pb2.CONTENT_WARNING_NSFW,
+        ):
+            return raw_cw
+    raise ValueError(f"invalid contentWarning {raw_cw!r} for {package_name}")
+
+
 def build_catalog(entries, metadata):
     if not isinstance(entries, list) or not entries:
         raise ValueError("catalog must be a non-empty list")
@@ -107,11 +137,7 @@ def build_catalog(entries, metadata):
             extensionLib=version_match.group(1),
             versionCode=int(version_match.group(1)) * 100_000 + code,
             versionName=version_name,
-            contentWarning=(
-                index_pb2.CONTENT_WARNING_NSFW
-                if nsfw == 1
-                else index_pb2.CONTENT_WARNING_SAFE
-            ),
+            contentWarning=_resolve_content_warning(item, package_name, nsfw),
             isTorrent=torrent,
         )
         extension.resources.apkUrl = APK_BASE_URL + apk_name

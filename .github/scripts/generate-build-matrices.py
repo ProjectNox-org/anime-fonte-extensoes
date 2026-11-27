@@ -19,7 +19,10 @@ MULTISRC_LIB_REGEX = re.compile(r"^lib-multisrc/(?P<multisrc>\w+)")
 LIB_REGEX = re.compile(r"^lib/(?P<lib>\w+)")
 MODULE_REGEX = re.compile(r"^:src:(?P<lang>\w+):(?P<extension>\w+)$")
 CORE_FILES_REGEX = re.compile(
-    r"^(common/|core/|compiler/|extensions-lib/|gradle/|build\.gradle\.kts|common\.gradle|gradle\.properties|settings\.gradle\.kts|\.github/scripts/(?:create-repo|merge-repo|move-built-apks)\.py)"
+    r"^(common/|core/|compiler/|extensions-lib/|gradle/|build\.gradle\.kts|common\.gradle|gradle\.properties|settings\.gradle\.kts)"
+)
+CATALOG_METADATA_SCRIPTS_REGEX = re.compile(
+    r"^\.github/scripts/(?:create-repo|merge-repo|move-built-apks|publish_protobuf)\.py$"
 )
 
 def run_command(command: str) -> str:
@@ -150,6 +153,9 @@ def get_module_list(ref: str) -> tuple[list[str], list[str]]:
     for file in map(lambda x: Path(x).as_posix(), changed_files):
         if CORE_FILES_REGEX.search(file):
             core_files_changed = True
+
+        elif CATALOG_METADATA_SCRIPTS_REGEX.search(file):
+            print(f"Metadata/catalog script changed ({file}) — regenerating indexes without mass APK rebuild.")
 
         elif match := EXTENSION_REGEX.search(file):
             lang = match.group("lang")

@@ -494,6 +494,14 @@ class SyncRegressionSuiteTest(unittest.TestCase):
     def test_12_shared_module_indirect_impacts(self):
         self.assertTrue(gbm.CORE_FILES_REGEX.match("extensions-lib/build.gradle.kts"))
         self.assertTrue(gbm.CORE_FILES_REGEX.match("core/build.gradle.kts"))
+        for cat_script in (
+            ".github/scripts/create-repo.py",
+            ".github/scripts/merge-repo.py",
+            ".github/scripts/move-built-apks.py",
+            ".github/scripts/publish_protobuf.py",
+        ):
+            self.assertFalse(gbm.CORE_FILES_REGEX.match(cat_script), f"{cat_script} must not trigger mass APK rebuild")
+            self.assertTrue(gbm.CATALOG_METADATA_SCRIPTS_REGEX.match(cat_script))
         upstream, _, local = self._init_bare_and_pair("t12")
         (upstream / "lib/myhelper").mkdir(parents=True)
         (upstream / "lib/myhelper/build.gradle.kts").write_text("dependencies {}\n")
@@ -514,6 +522,16 @@ class SyncRegressionSuiteTest(unittest.TestCase):
             'dependencies { implementation(project(":lib:myhelper")) }\nyuzono { versionCode = 1 }\n'
         )
         self.assertIn("src/en/useshelper", sync.detect_indirect_impacts(["lib/myhelper"]))
+        with patch.object(gbm, "get_publish_pending_modules", return_value=[]), \
+             patch.object(gbm, "run_command", return_value="M\t.github/scripts/create-repo.py\n"):
+            mods_meta_only, dels_meta_only = gbm.get_module_list("HEAD~1")
+            self.assertEqual(mods_meta_only, [], "Metadata-only script change must not schedule APK builds")
+            self.assertEqual(dels_meta_only, [])
+        with patch.object(gbm, "get_publish_pending_modules", return_value=[]), \
+             patch.object(gbm, "run_command", return_value="M\t.github/scripts/create-repo.py\nM\tsrc/en/useshelper/build.gradle.kts\n"):
+            mods, dels = gbm.get_module_list("HEAD~1")
+            self.assertEqual(mods, [":src:en:useshelper"])
+            self.assertEqual(dels, ["en.useshelper"])
 
     # 13, 14, 15. Publicação, assinaturas, versionCodes, compatibilidade torrent/manifest/catalogs
     def test_13_14_15_publication_signatures_versioncodes_and_catalog_compat(self):
@@ -616,6 +634,105 @@ class SyncRegressionSuiteTest(unittest.TestCase):
         self.assertIn("eu.kanade.tachiyomi.animeextension.all.modern", data)
         self.assertIn("eu.kanade.tachiyomi.animeextension.pt.legacy", data)
         self.assertEqual(data["eu.kanade.tachiyomi.animeextension.all.modern"][0]["id"], "123456")
+
+    def test_18_create_repo_apostrophe_special_chars_and_content_warning(self):
+        create_repo_mod = _load_module("create_repo_cw_mod", "create-repo.py")
+        import zipfile
+        work = self.temp_dir / "cr_special"
+        apk_dir = work / "repo/apk"
+        info_dir = work / "source-info"
+        apk_dir.mkdir(parents=True)
+        info_dir.mkdir(parents=True)
+
+        for fname, badging_meta, si in (
+            (
+                "aniyomi-es.samatodenvideos-v14.2.apk",
+                (
+                    "package: name='eu.kanade.tachiyomi.animeextension.es.samatodenvideos' versionCode='2' versionName='14.2'\n"
+                    "application-label:'Aniyomi: Samato's Den: Videos'\n"
+                    "application-icon-320:'res/icon.png'\n"
+                    "meta-data: name='aniyomix.name' value='Samato's Den: Videos'\n"
+                    "meta-data: name='tachiyomi.animeextension.nsfw' value='1'\n"
+                    "meta-data: name='aniyomix.contentWarning' value='2'\n"
+                ),
+                None,
+            ),
+            (
+                "aniyomi-all.movy-v16.7.apk",
+                (
+                    "package: name='eu.kanade.tachiyomi.animeextension.all.movy' versionCode='7' versionName='16.7'\n"
+                    "application-label:'Aniyomi: Movy & Co (HD) \\'Live\\''\n"
+                    "application-icon-320:'res/icon.png'\n"
+                    "meta-data: name='tachiyomi.animeextension.nsfw' value='1'\n"
+                    "meta-data: name='aniyomix.contentWarning' value='1'\n"
+                ),
+                {
+                    "packageName": "eu.kanade.tachiyomi.animeextension.all.movy",
+                    "name": "Movy & Co (HD) 'Live'",
+                    "contentWarning": 2,
+                    "sources": [{"name": "Movy", "lang": "all", "id": 111, "baseUrl": "https://movy.test"}],
+                },
+            ),
+        ):
+            apk_path = apk_dir / fname
+            with zipfile.ZipFile(apk_path, "w") as zf:
+                zf.writestr("res/icon.png", b"pngdata")
+            if si is not None:
+                (info_dir / f"{si['packageName']}.json").write_text(json.dumps(si), encoding="utf-8")
+
+        badging_by_apk = {
+            "aniyomi-es.samatodenvideos-v14.2.apk": (
+                "package: name='eu.kanade.tachiyomi.animeextension.es.samatodenvideos' versionCode='2' versionName='14.2'\n"
+                "application-label:'Aniyomi: Samato's Den: Videos'\n"
+                "application-icon-320:'res/icon.png'\n"
+                "meta-data: name='aniyomix.name' value='Samato's Den: Videos'\n"
+                "meta-data: name='tachiyomi.animeextension.nsfw' value='1'\n"
+                "meta-data: name='aniyomix.contentWarning' value='2'\n"
+            ),
+            "aniyomi-all.movy-v16.7.apk": (
+                "package: name='eu.kanade.tachiyomi.animeextension.all.movy' versionCode='7' versionName='16.7'\n"
+                "application-label:'Aniyomi: Movy & Co (HD) \\'Live\\''\n"
+                "application-icon-320:'res/icon.png'\n"
+                "meta-data: name='tachiyomi.animeextension.nsfw' value='1'\n"
+                "meta-data: name='aniyomix.contentWarning' value='1'\n"
+            ),
+        }
+        (work / "output.json").write_text(
+            json.dumps({
+                "eu.kanade.tachiyomi.animeextension.es.samatodenvideos": [
+                    {"name": "Samato's Den: Videos", "lang": "es", "id": "906", "baseUrl": "https://samato.test", "versionId": 1}
+                ],
+                "eu.kanade.tachiyomi.animeextension.all.movy": [
+                    {"name": "Movy", "lang": "all", "id": "111", "baseUrl": "https://movy.test", "versionId": 1}
+                ],
+            }),
+            encoding="utf-8",
+        )
+        orig = Path.cwd()
+        os.chdir(work)
+        try:
+            with patch.object(create_repo_mod, "_aapt_badging", side_effect=lambda p: badging_by_apk[p.name]):
+                create_repo_mod.create_repo(resolve_sources=False)
+        finally:
+            os.chdir(orig)
+
+        created = {e["pkg"]: e for e in json.loads((work / "repo/index.min.json").read_text(encoding="utf-8"))}
+        self.assertEqual(
+            created["eu.kanade.tachiyomi.animeextension.es.samatodenvideos"]["name"],
+            "Aniyomi: Samato's Den: Videos",
+        )
+        self.assertEqual(
+            created["eu.kanade.tachiyomi.animeextension.es.samatodenvideos"]["contentWarning"],
+            "NSFW",
+        )
+        self.assertEqual(
+            created["eu.kanade.tachiyomi.animeextension.all.movy"]["name"],
+            "Aniyomi: Movy & Co (HD) 'Live'",
+        )
+        self.assertEqual(
+            created["eu.kanade.tachiyomi.animeextension.all.movy"]["contentWarning"],
+            "MIXED",
+        )
 
     # 17. Targeted PT-BR policy: sync unmodified/new PT-BR with monotonic deployed guard, preserve custom/protected
     def test_17_targeted_ptbr_syncs_unmodified_and_new_while_protecting_custom(self):

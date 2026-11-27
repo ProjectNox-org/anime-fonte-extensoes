@@ -59,8 +59,66 @@ def get_torrent_modules() -> set[str] | None:
     return modules
 
 
+_EXT_NAME_DOUBLE_RE = re.compile(r'(?m)^[ \t]*(?:name|extName)[ \t]*=[ \t]*"((?:\\.|[^"\\])*)"[ \t]*(?://.*)?$')
+_EXT_NAME_SINGLE_RE = re.compile(r"(?m)^[ \t]*(?:name|extName)[ \t]*=[ \t]*'((?:\\.|[^'\\])*)'[ \t]*(?://.*)?$")
+_CW_DSL_RE = re.compile(r"\bcontentWarning\s*=\s*ContentWarning\.(SAFE|MIXED|NSFW)\b")
+_IS_NSFW_LEGACY_RE = re.compile(r"(?m)^[ \t]*isNsfw[ \t]*=[ \t]*(true|false)\b")
+
+
+def get_source_metadata() -> dict[str, dict[str, str]]:
+    """Read declared extension names and ContentWarning (SAFE/MIXED/NSFW) from source build files."""
+    branch_dir_name = sys.argv[2].removesuffix("/repo") if sys.argv[2].endswith("/repo") else sys.argv[2].split('/')[0]
+    src_dir = REMOTE_REPO.parent.joinpath(branch_dir_name, "src")
+    metadata: dict[str, dict[str, str]] = {}
+    if not src_dir.is_dir():
+        return metadata
+
+    for lang_dir in src_dir.iterdir():
+        if not lang_dir.is_dir():
+            continue
+        for ext_dir in lang_dir.iterdir():
+            if not ext_dir.is_dir():
+                continue
+            config = ext_dir / "build.gradle.kts"
+            is_kts = config.is_file()
+            if not is_kts:
+                config = ext_dir / "build.gradle"
+            if not config.is_file():
+                continue
+
+            text = config.read_text(encoding="utf-8", errors="ignore")
+            entry: dict[str, str] = {}
+
+            name_match = _EXT_NAME_DOUBLE_RE.search(text) or _EXT_NAME_SINGLE_RE.search(text)
+            if name_match:
+                raw_name = (
+                    name_match.group(1)
+                    .replace("\\'", "'")
+                    .replace('\\"', '"')
+                    .replace("\\\\", "\\")
+                )
+                if raw_name:
+                    entry["name"] = f"Aniyomi: {raw_name}"
+
+            cw_match = _CW_DSL_RE.search(text)
+            if cw_match:
+                entry["contentWarning"] = cw_match.group(1)
+            else:
+                nsfw_match = _IS_NSFW_LEGACY_RE.search(text)
+                if nsfw_match:
+                    entry["contentWarning"] = "NSFW" if nsfw_match.group(1) == "true" else "SAFE"
+                elif is_kts:
+                    entry["contentWarning"] = "SAFE"
+
+            if entry:
+                metadata[f"{lang_dir.name}.{ext_dir.name}"] = entry
+
+    return metadata
+
+
 existing_modules = get_existing_modules()
 torrent_modules = get_torrent_modules()
+source_metadata = get_source_metadata()
 
 # Load indexes
 with REMOTE_REPO.joinpath("index.json").open() as remote_index_file:
@@ -144,13 +202,26 @@ for item in local_index:
     index_by_pkg[item["pkg"]] = item
 
 index = sorted(index_by_pkg.values(), key=lambda x: x["pkg"])
-if torrent_modules is not None:
-    for item in index:
-        if pkg_to_module(item["pkg"]) in torrent_modules:
+for item in index:
+    module = pkg_to_module(item["pkg"])
+    if torrent_modules is not None:
+        if module in torrent_modules:
             # Anikku and Aniyomi legacy JSON expect torrent as Int (0/1), not bool
             item["torrent"] = 1
         else:
             item.pop("torrent", None)
+
+    src_meta = source_metadata.get(module)
+    if src_meta:
+        if "name" in src_meta:
+            item["name"] = src_meta["name"]
+        if "contentWarning" in src_meta:
+            cw = src_meta["contentWarning"]
+            item["contentWarning"] = cw
+            item["nsfw"] = 1 if cw in {"MIXED", "NSFW"} else 0
+
+    if "contentWarning" not in item:
+        item["contentWarning"] = "NSFW" if item.get("nsfw") == 1 else "SAFE"
 
 # Garbage Collection: Remove any APK or Icon that is not in the final index
 valid_apks = {item["apk"] for item in index}
@@ -171,6 +242,7 @@ with REMOTE_REPO.joinpath("index.json").open("w", encoding="utf-8") as index_fil
     json.dump(index, index_file, ensure_ascii=False, indent=2)
 
 for item in index:
+    item.pop("contentWarning", None)
     for source in item["sources"]:
         source.pop("versionId", None)
 

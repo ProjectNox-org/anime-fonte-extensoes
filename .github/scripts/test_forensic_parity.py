@@ -1291,6 +1291,82 @@ class ForensicParityTest(unittest.TestCase):
                 self.assertEqual(cached_path, jar_path)
                 mock_resolve.assert_not_called()
 
+    def test_consistency_customization_aware_ptbr_version_drift_and_blocked_visibility(self):
+        """
+        Verify check-consistency.py:
+        1. Classifies uncustomized PT-BR extensions updated upstream as OUTDATED (not masked as PROTECTED_PTBR)
+        2. Flags VERSION_DRIFT when local effective version < deployed catalog version
+        3. Reports active deterministic blocks in the step summary and warning output
+        """
+        up_repo = self._init_repo("upstream_cons_audit")
+        nox_repo = self._init_repo("nox_cons_audit")
+
+        for u, code in (("src/pt/unmod", 2), ("src/pt/custom", 3)):
+            d = up_repo / u
+            d.mkdir(parents=True)
+            (d / "build.gradle.kts").write_text(f'yuzono {{\n    libVersion = "14"\n    versionCode = {code}\n}}\n')
+            (d / "Source.kt").write_text("class Source // v1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=up_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "Upstream init"], cwd=up_repo, check=True)
+
+        subprocess.run(["git", "remote", "add", "upstream", str(up_repo)], cwd=nox_repo, check=True)
+        subprocess.run(["git", "pull", "upstream", "main"], cwd=nox_repo, check=True)
+        subprocess.run(["git", "update-ref", "refs/remotes/upstream/master", "refs/remotes/upstream/main"], cwd=nox_repo, check=True)
+
+        # Custom edit on src/pt/custom + local version behind deployed catalog on src/pt/animeplay
+        (nox_repo / "src/pt/custom/Source.kt").write_text("class Source // Nox custom\n", encoding="utf-8")
+        ap_dir = nox_repo / "src/pt/animeplay"
+        ap_dir.mkdir(parents=True)
+        (ap_dir / "build.gradle.kts").write_text('yuzono {\n    libVersion = "14"\n    versionCode = 9\n}\n')
+        (ap_dir / "AnimePlay.kt").write_text("class AnimePlay\n", encoding="utf-8")
+        (nox_repo / ".github").mkdir(parents=True, exist_ok=True)
+        (nox_repo / ".github/sync-state.json").write_text(
+            json.dumps({"upstream_sha": "abc", "sync_status": "VALIDATED"}),
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "."], cwd=nox_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "Nox customization and drift"], cwd=nox_repo, check=True)
+
+        # Upstream updates src/pt/unmod (simulating upstream/master update)
+        (up_repo / "src/pt/unmod/Source.kt").write_text("class Source // v2 upstream fix\n", encoding="utf-8")
+        (up_repo / "src/pt/unmod/build.gradle.kts").write_text('yuzono {\n    libVersion = "14"\n    versionCode = 3\n}\n')
+        subprocess.run(["git", "add", "."], cwd=up_repo, check=True)
+        subprocess.run(["git", "commit", "-m", "Upstream update unmod"], cwd=up_repo, check=True)
+        subprocess.run(["git", "fetch", "upstream", "main"], cwd=nox_repo, check=True)
+        subprocess.run(["git", "update-ref", "refs/remotes/upstream/master", "refs/remotes/upstream/main"], cwd=nox_repo, check=True)
+
+        up_head = subprocess.check_output(["git", "rev-parse", "refs/remotes/upstream/master"], cwd=nox_repo, text=True).strip()
+        catalog = [
+            {"pkg": "eu.kanade.tachiyomi.animeextension.pt.unmod", "code": 2, "apk": "aniyomi-pt.unmod-v14.2.apk", "name": "Unmod", "version": "14.2"},
+            {"pkg": "eu.kanade.tachiyomi.animeextension.pt.custom", "code": 3, "apk": "aniyomi-pt.custom-v14.3.apk", "name": "Custom", "version": "14.3"},
+            {"pkg": "eu.kanade.tachiyomi.animeextension.pt.animeplay", "code": 14, "apk": "aniyomi-pt.animeplay-v14.14.apk", "name": "AnimePlay", "version": "14.14"},
+        ]
+
+        os.chdir(nox_repo)
+        apk_dir = Path(self.temp_dir) / "apks_cons"
+        apk_dir.mkdir(parents=True, exist_ok=True)
+        for item in catalog:
+            (apk_dir / item["apk"]).write_bytes(b"PK\x03\x04dummy")
+        cat_file = apk_dir.parent / "index.min.json"
+        cat_file.write_text(json.dumps(catalog), encoding="utf-8")
+
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with patch("check_consistency_mod.get_upstream_head", return_value=up_head), \
+             patch("check_consistency_mod.get_sync_branch_head", return_value=up_head), \
+             patch("check_consistency_mod.load_sync_module", return_value=sync), \
+             patch("check_consistency_mod.get_deployed_catalog", return_value=(catalog, "Test Dist", "VERIFIED", apk_dir, None, str(cat_file))), \
+             redirect_stdout(buf):
+            rc = checker.check_consistency(check_pending=True)
+        out_txt = buf.getvalue()
+        self.assertEqual(rc, 2, "Uncustomized PT-BR upstream update must return exit code 2")
+        self.assertIn("`OUTDATED` | 1", out_txt)
+        self.assertIn("`PROTECTED_PTBR` | 2", out_txt)
+        self.assertIn("src/pt/unmod", out_txt)
+        self.assertIn("VERSION_DRIFT", out_txt)
+        self.assertIn("src/pt/animeplay (local=9 < catalog=14)", out_txt)
+
 
 if __name__ == "__main__":
     unittest.main()

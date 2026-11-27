@@ -2425,6 +2425,11 @@ def get_publish_pending_units(
                 if local_eff_code > dep_code:
                     pending.append(u)
                     continue
+                if dep_code > 0 and local_eff_code < dep_code:
+                    print(
+                        f"::warning::VERSION_DRIFT: {u} local version ({local_eff_code}) is behind deployed catalog ({dep_code})",
+                        file=sys.stderr,
+                    )
             apk_name = dep.get("apk")
             if not apk_name:
                 pending.append(u)
@@ -3047,6 +3052,18 @@ def main() -> None:
         print(f"Inputs unchanged (code={code_sha[:10]}, upstream={upstream_head[:10]}).")
         print("Skipping redundant retry until main code or upstream advances.")
         print("==================================================")
+        print(
+            f"::warning::Sync blocked deterministically on upstream {upstream_head[:10]} "
+            f"({blocked_cand.get('failure_type')}: {blocked_cand.get('cause')})"
+        )
+        write_step_summary(
+            protected=[],
+            bumped=[],
+            new_units=[],
+            updated_units=[],
+            removed_units=[],
+            sync_result="BLOCKED_DETERMINISTIC",
+        )
         set_github_output("should_pulse", "false")
         print_observability_footer("BLOCKED_DETERMINISTIC", "SKIPPED", "SKIPPED")
         return
@@ -3192,6 +3209,15 @@ def main() -> None:
             print(f"Code SHA: {code_sha[:10]} | Cause: {pub_block.get('cause')}")
             print("Skipping redundant build_push.yml dispatch until code changes.")
             print("==================================================")
+            print(f"::warning::Publication recovery suspended for {code_sha[:10]}: {pub_block.get('cause')}")
+            write_step_summary(
+                protected=protected,
+                bumped=[],
+                new_units=[],
+                updated_units=[],
+                removed_units=[],
+                sync_result="BLOCKED_DETERMINISTIC",
+            )
             set_github_output("should_pulse", "false")
             print_observability_footer("NO_CHANGES", "SKIPPED", "BLOCKED_DETERMINISTIC")
             return

@@ -513,7 +513,7 @@ class SyncDeletionTest(unittest.TestCase):
         )
         self.assertIn(
             b"https://darkmahou.io",
-            before["src/eu/kanade/tachiyomi/animeextension/pt/darkmahou/DarkMahou.kt"],
+            before["build.gradle.kts"],
         )
 
         upstream_ref, up_units, main_units = self.create_divergence(

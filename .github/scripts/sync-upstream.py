@@ -2159,9 +2159,10 @@ def _apply_units_inner(
     deletion_protection_set = set(protected_deletions or [])
     explicit_locked_set = (
         deletion_protection_set
-        | get_explicit_code_protections(upstream_ref=upstream_ref)
+        | set(EXPLICIT_LOCKED_UNITS)
+        | set(get_explicit_delete_protections())
     )
-    explicit_protection_set = explicit_locked_set | protected_ptbr_units
+    explicit_protection_set = explicit_locked_set | protected_ptbr_units | get_explicit_code_protections(upstream_ref=upstream_ref)
     deferred_units = set((deferred_incompatibilities or {}).keys())
     upstream_diff_entries = changed_entries(base, upstream_ref)
     upstream_changed_units, _ = collect_units(upstream_diff_entries)
@@ -2330,7 +2331,12 @@ def _apply_units_inner(
 
     # Verify protected/customized PT-BR snapshot integrity: MUST be 100% byte-for-byte identical
     # (excluding units where a compatible Lib 16 non-build patch explicitly succeeded cleanly)
-    verify_ptbr_unchanged(pre_ptbr_snapshot, units=(protected_ptbr_units - auto_merged_ptbr_units))
+    checked_protected_units = protected_ptbr_units - auto_merged_ptbr_units
+    filtered_pre_ptbr_snapshot = {
+        k: v for k, v in pre_ptbr_snapshot.items()
+        if "/".join(k.split("/")[:3]) in checked_protected_units
+    }
+    verify_ptbr_unchanged(filtered_pre_ptbr_snapshot, units=checked_protected_units)
 
     git("diff", "--check")
 

@@ -1,11 +1,13 @@
+import io.github.keiyoushi.gradle.api.ContentWarning
+
 plugins {
     alias(kei.plugins.extension)
 }
 
 yuzono {
     name = "Goyabu"
-    versionCode = 8
-    contentWarning = ContentWarning.NSFW
+    versionCode = 9
+    contentWarning = ContentWarning.MIXED
     libVersion = "14"
 
     source {

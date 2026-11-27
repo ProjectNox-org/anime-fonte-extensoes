@@ -899,7 +899,10 @@ class ForensicParityTest(unittest.TestCase):
 
         target_unit = "src/en/anipm"
         target_pkg = "eu.kanade.tachiyomi.animeextension.en.anipm"
-        target_apk_name = "aniyomi-en.anipm-v16.14.apk"
+        target_eff = sync.effective_version(None, target_unit)
+        target_code = target_eff[2] if target_eff else 1
+        target_lib = sync.read_lib_version(None, target_unit)
+        target_apk_name = f"aniyomi-en.anipm-v{target_lib}.{target_code}.apk"
 
         # Prepare staging legitimate artifact
         staging_apk = staging_dir / target_apk_name
@@ -980,7 +983,7 @@ class ForensicParityTest(unittest.TestCase):
         recovered_entry = next((e for e in updated_min if e["pkg"] == target_pkg), None)
         self.assertIsNotNone(recovered_entry, "Recovered entry must exist in index.min.json")
         self.assertEqual(recovered_entry["apk"], target_apk_name, "Catalog APK name must match artifact")
-        self.assertEqual(recovered_entry["code"], 14, "Catalog versionCode must match source")
+        self.assertEqual(recovered_entry["code"], target_code, "Catalog versionCode must match source")
 
         # 9-10. Subsequent check returns exit code 0 (NO_CHANGES)
         with patch("check_consistency_mod.get_upstream_head", return_value="f21e729f"), \

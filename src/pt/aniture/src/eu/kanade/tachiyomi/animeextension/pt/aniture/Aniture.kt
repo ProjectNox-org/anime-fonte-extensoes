@@ -7,6 +7,8 @@ import eu.kanade.tachiyomi.animeextension.BuildConfig
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.Hoster.Companion.toHosterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
@@ -14,6 +16,7 @@ import eu.kanade.tachiyomi.multisrc.dooplay.DooPlay
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.tryParse
 import kotlinx.coroutines.Dispatchers
@@ -29,10 +32,8 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 
-class Aniture : DooPlay() {
-    override val lang = "pt-BR"
-    override val name = "Aniture PT"
-    override val baseUrl = "https://aniture-pt.com.br"
+@Source
+abstract class Aniture : DooPlay() {
     override val fetchGenres = false
 
     override fun headersBuilder() = super.headersBuilder().set("Referer", "$baseUrl/")
@@ -204,8 +205,8 @@ class Aniture : DooPlay() {
         )
     }
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        val document = client.newCall(videoListRequest(episode)).awaitSuccess().use { it.asJsoup() }
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val document = client.newCall(GET(baseUrl + episode.url, headers)).awaitSuccess().use { it.asJsoup() }
         val frames = document.select(".source-box:not(#source-player-trailer) .pframe iframe[src]")
             .mapNotNull { it.absUrl("src").toHttpUrlOrNull() }
             .distinct()
@@ -222,7 +223,7 @@ class Aniture : DooPlay() {
             }
         }
         videoDebug("Blogger videos=${videos.size}")
-        if (videos.isNotEmpty() && !preferences.getBoolean("alternate_servers", false)) return videos.distinctBy { it.videoUrl }.sort()
+        if (videos.isNotEmpty() && !preferences.getBoolean("alternate_servers", false)) return videos.distinctBy { it.videoUrl }.sort().toHosterList()
 
         for (frame in frames.filter { it.host == "animes.strp2p.com" }) {
             try {
@@ -233,7 +234,7 @@ class Aniture : DooPlay() {
                 videoDebug("STRP2P failed type=${e.javaClass.simpleName}")
             }
         }
-        if (videos.isNotEmpty()) return videos.distinctBy { it.videoUrl }.sort()
+        if (videos.isNotEmpty()) return videos.distinctBy { it.videoUrl }.sort().toHosterList()
 
         // Resolve fallback hosts only when Blogger has no usable media.
         // This keeps slow or broken secondary servers out of Blogger's critical path.
@@ -260,8 +261,10 @@ class Aniture : DooPlay() {
             }
         }
         videoDebug("fallback videos=${videos.size}")
-        return videos.distinctBy { it.videoUrl }.sort()
+        return videos.distinctBy { it.videoUrl }.sort().toHosterList()
     }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = hoster.videoList.orEmpty()
 
     companion object {
         private fun debug(message: String) {

@@ -24,7 +24,7 @@ internal class BloggerPlayer(client: OkHttpClient, headers: Headers) {
                 null -> if (media.queryParameter("mime") == "video/mp4") "Unknown" else return@mapNotNull null
                 else -> return@mapNotNull null
             }
-            Video(video.videoUrl, "Blogger - $quality", video.videoUrl, playbackHeaders)
+            Video(videoUrl = video.videoUrl, videoTitle = "Blogger - $quality", headers = playbackHeaders)
         }
         .distinctBy { it.videoUrl }
         .also { Aniture.videoDebug("Blogger qualities=${it.joinToString { video -> video.videoTitle }}") }

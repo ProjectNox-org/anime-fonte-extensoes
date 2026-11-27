@@ -32,7 +32,7 @@ class DarkMahouExtractor(private val client: OkHttpClient, private val headers: 
                     videoUrl += "&index=0"
                 }
                 val quality = link.text().trim()
-                videos.add(Video(videoUrl, "$prefix - $quality", videoUrl))
+                videos.add(Video(videoUrl = videoUrl, videoTitle = "$prefix - $quality"))
             }
         }
 
@@ -46,7 +46,7 @@ class DarkMahouExtractor(private val client: OkHttpClient, private val headers: 
                 }
                 val quality = link.text().trim()
                 val name = if (prefix.isNotEmpty()) "$prefix - $quality" else quality
-                videos.add(Video(videoUrl, name, videoUrl))
+                videos.add(Video(videoUrl = videoUrl, videoTitle = name))
             }
         }
 

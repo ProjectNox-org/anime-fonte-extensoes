@@ -3,15 +3,16 @@ package eu.kanade.tachiyomi.animeextension.pt.meusanimes
 import aniyomi.lib.bloggerextractor.BloggerExtractor
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.annotation.Source
-import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.useAsJsoup
-import kotlinx.coroutines.runBlocking
 import okhttp3.Request
 import okhttp3.Response
 import org.json.JSONObject
@@ -19,7 +20,7 @@ import org.jsoup.nodes.Document
 import java.net.URLEncoder
 
 @Source
-abstract class MeusAnimes : AnimeHttpLegacySource() {
+abstract class MeusAnimes : AnimeHttpSource() {
 
     override val supportsLatest = false
 
@@ -248,24 +249,18 @@ abstract class MeusAnimes : AnimeHttpLegacySource() {
             .sortedByDescending { it.episode_number }
     }
 
-    // Videos: Video list request
-    override fun videoListRequest(episode: SEpisode): Request = GET(baseUrl + episode.url, headers)
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
 
-    // Parse video list from episode page
-    override fun videoListParse(response: Response): List<Video> {
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    // Videos: Hoster list
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val response = client.newCall(GET(baseUrl + episode.url, headers)).awaitSuccess()
         val html = response.bodyString()
-        val videoList = mutableListOf<Video>()
-        val extractor = BloggerExtractor(client)
 
         // 1. Clean HTML: remove JSON escapes for cleaner URLs
         val cleanHtml = html.replace("\\/", "/")
             .replace("\\u0026", "&")
-
-        val browserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) Gecko/20100101 Firefox/146.0"
-        val googleHeaders = headersBuilder()
-            .set("User-Agent", browserUserAgent)
-            .set("Referer", "https://youtube.googleapis.com/")
-            .build()
 
         // 2. Enhanced regex to capture links anywhere in JSON
         val legRegex = """player_leg"\s*:\s*"([^"]+)""".toRegex()
@@ -274,38 +269,51 @@ abstract class MeusAnimes : AnimeHttpLegacySource() {
         val legMatch = legRegex.find(cleanHtml)?.groupValues?.get(1)
         val dubMatch = dubRegex.find(cleanHtml)?.groupValues?.get(1)
 
-        // Helper function to add videos from URL
-        fun addVideos(url: String, prefix: String) {
-            if (url.isEmpty() || !url.contains("blogger.com")) return
-
-            runCatching {
-                runBlocking { extractor.videosFromUrl(url, googleHeaders) }
-                    .forEach { video ->
-                        videoList.add(
-                            Video(
-                                videoUrl = video.videoUrl,
-                                videoTitle = "$prefix: ${video.videoTitle}",
-                                headers = googleHeaders,
-                            ),
-                        )
-                    }
+        val hosters = mutableListOf<Hoster>()
+        fun addHoster(url: String, prefix: String) {
+            if (url.isNotEmpty() && url.contains("blogger.com")) {
+                hosters.add(Hoster(hosterUrl = url, hosterName = prefix, internalData = prefix))
             }
         }
 
         // Process Legendado (subtitled) and Dublado (dubbed) streams
-        legMatch?.let { addVideos(it, "Legendado") }
-        dubMatch?.let { addVideos(it, "Dublado") }
+        legMatch?.let { addHoster(it, "Legendado") }
+        dubMatch?.let { addHoster(it, "Dublado") }
 
         // 3. Fallback: if keys change, try to capture any loose blogger links
-        if (videoList.isEmpty()) {
+        if (hosters.isEmpty()) {
             val fallbackRegex = """https?://www\.blogger\.com/video\.g\?token=[a-zA-Z0-9_-]+""".toRegex()
             fallbackRegex.findAll(cleanHtml)
                 .map { it.value }
                 .distinct()
                 .take(2)
-                .forEach { addVideos(it, "Player") }
+                .forEach { addHoster(it, "Player") }
         }
 
-        return videoList
+        return hosters
+    }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val url = hoster.hosterUrl
+        if (url.isEmpty() || !url.contains("blogger.com")) return emptyList()
+
+        val browserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) Gecko/20100101 Firefox/146.0"
+        val googleHeaders = headersBuilder()
+            .set("User-Agent", browserUserAgent)
+            .set("Referer", "https://youtube.googleapis.com/")
+            .build()
+
+        val extractor = BloggerExtractor(client)
+        val prefix = hoster.internalData.ifBlank { hoster.hosterName }
+
+        return runCatching {
+            extractor.videosFromUrl(url, googleHeaders).map { video ->
+                Video(
+                    videoUrl = video.videoUrl,
+                    videoTitle = "$prefix: ${video.videoTitle}",
+                    headers = googleHeaders,
+                )
+            }
+        }.getOrDefault(emptyList())
     }
 }

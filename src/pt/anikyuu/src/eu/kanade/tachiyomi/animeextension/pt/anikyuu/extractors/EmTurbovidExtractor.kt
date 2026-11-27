@@ -69,8 +69,7 @@ class EmTurbovidExtractor(
             listOf(
                 Video(
                     videoUrl = localUrl,
-                    url = realHls.url,
-                    quality = quality,
+                    videoTitle = quality,
                     headers = hlsHeaders,
                 ),
             )

@@ -62,9 +62,9 @@ class EmbedPlayerExtractor(private val client: OkHttpClient, private val headers
                     videoNameGen = { hlsQuality -> if (hlsQuality.equals("Video", true)) quality else "$quality - $hlsQuality" },
                 )
             }.onFailure { Log.e(tag, "Failed to expand HLS playlist: $videoUrl", it) }
-                .getOrElse { listOf(Video(videoUrl, quality, videoUrl, pageHeaders)) }
+                .getOrElse { listOf(Video(videoUrl = videoUrl, videoTitle = quality, headers = pageHeaders)) }
         }
-        return listOf(Video(videoUrl, quality, videoUrl, pageHeaders))
+        return listOf(Video(videoUrl = videoUrl, videoTitle = quality, headers = pageHeaders))
     }
 
     private fun isM3u8Url(url: String) = Regex("""\\.m3u8($|\\?|#)""", RegexOption.IGNORE_CASE).containsMatchIn(url) ||

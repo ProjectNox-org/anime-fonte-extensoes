@@ -6,9 +6,9 @@ plugins {
 
 yuzono {
     name = "Doramogo"
-    versionCode = 23
+    versionCode = 24
     contentWarning = ContentWarning.SAFE
-    libVersion = "14"
+    libVersion = "16"
 
     source {
         lang = "pt-BR"

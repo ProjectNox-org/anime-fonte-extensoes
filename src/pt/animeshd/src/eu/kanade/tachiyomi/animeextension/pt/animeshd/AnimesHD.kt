@@ -6,6 +6,7 @@ import eu.kanade.tachiyomi.animeextension.BuildConfig
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
@@ -14,14 +15,16 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -32,10 +35,8 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 
-class AnimesHD : DooPlay() {
-    override val lang = "pt-BR"
-    override val name = "Animes HD"
-    override val baseUrl = "https://animeshd.to"
+@Source
+abstract class AnimesHD : DooPlay() {
     override val fetchGenres = false
     override val prefQualityKey = "quality_selection"
     override val prefQualityDefault = "best"
@@ -128,55 +129,72 @@ class AnimesHD : DooPlay() {
     private fun parseDate(value: String?) = synchronized(dateFormat) { dateFormat.tryParse(value?.replace(".", "")) }
 
     private val blogger by lazy { BloggerExtractor(client) }
-    override fun videoListParse(response: Response): List<Video> {
-        val doc = response.asJsoup()
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val doc = client.newCall(GET(baseUrl + episode.url, headers)).awaitSuccess().asJsoup()
+        val episodeUrl = doc.location().ifBlank { baseUrl + episode.url }
         val options = doc.select("#playeroptions li[data-post][data-type][data-nume]")
-        val videos = mutableListOf<Video>()
-        for (option in options) {
-            if (option.attr("data-nume") == "trailer") continue
+        return options.mapNotNull { option ->
+            val nume = option.attr("data-nume")
+            if (nume == "trailer") return@mapNotNull null
             val label = option.selectFirst(".title")?.text().orEmpty()
-            val language = when {
-                label.contains("dublado", true) -> "Dublado"
-                label.contains("legendado", true) -> "Legendado"
-                else -> "Idioma não informado"
-            }
-            try {
-                val resolved = runBlocking {
-                    withTimeoutOrNull(15_000) {
-                        val form = FormBody.Builder().add("action", "doo_player_ajax")
-                            .add("post", option.attr("data-post")).add("type", option.attr("data-type"))
-                            .add("nume", option.attr("data-nume")).build()
-                        val ajaxHeaders = headers.newBuilder().set("Referer", doc.location()).set("X-Requested-With", "XMLHttpRequest").build()
-                        val embed = client.newCall(POST("$baseUrl/wp-admin/admin-ajax.php", ajaxHeaders, form)).awaitSuccess().parseAs<Player>()
-                        val url = embed.url.toHttpUrlOrNull() ?: return@withTimeoutOrNull emptyList()
-                        videoDebug("ajax=200 host=${url.host} language=$language")
-                        if (url.host != "www.blogger.com" && url.host != "blogger.com") {
-                            videoDebug("unsupported host=${url.host}")
-                            return@withTimeoutOrNull emptyList()
-                        }
-                        val mediaHeaders = headers.newBuilder().set("Referer", "https://www.blogger.com/").build()
-                        blogger.videosFromUrl(url.toString(), mediaHeaders).mapNotNull { video ->
-                            val media = video.videoUrl?.toHttpUrlOrNull() ?: return@mapNotNull null
-                            if (!media.host.endsWith(".googlevideo.com") || media.encodedPath != "/videoplayback") return@mapNotNull null
-                            val quality = when (media.queryParameter("itag")) {
-                                "18" -> "360p"
-                                "22" -> "720p"
-                                "37" -> "1080p"
-                                "59", "78" -> "480p"
-                                null -> if (media.queryParameter("mime") == "video/mp4") "Unknown" else return@mapNotNull null
-                                else -> return@mapNotNull null
-                            }
-                            Video(video.videoUrl, "Blogger - $language - $quality", video.videoUrl, mediaHeaders)
-                        }
-                    }.orEmpty()
+            val payload = Json.encodeToString(
+                PlayerOption(
+                    post = option.attr("data-post"),
+                    type = option.attr("data-type"),
+                    nume = nume,
+                    label = label,
+                    referer = episodeUrl,
+                ),
+            )
+            Hoster(
+                hosterUrl = "$episodeUrl#$nume",
+                hosterName = label.ifBlank { "Player $nume" },
+                internalData = payload,
+            )
+        }
+    }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val option = runCatching { Json.decodeFromString<PlayerOption>(hoster.internalData) }.getOrNull()
+            ?: return emptyList()
+        val language = when {
+            option.label.contains("dublado", true) -> "Dublado"
+            option.label.contains("legendado", true) -> "Legendado"
+            else -> "Idioma não informado"
+        }
+        val videos = try {
+            withTimeoutOrNull(15_000) {
+                val form = FormBody.Builder().add("action", "doo_player_ajax")
+                    .add("post", option.post).add("type", option.type)
+                    .add("nume", option.nume).build()
+                val ajaxHeaders = headers.newBuilder().set("Referer", option.referer).set("X-Requested-With", "XMLHttpRequest").build()
+                val embed = client.newCall(POST("$baseUrl/wp-admin/admin-ajax.php", ajaxHeaders, form)).awaitSuccess().parseAs<Player>()
+                val url = embed.url.toHttpUrlOrNull() ?: return@withTimeoutOrNull emptyList()
+                videoDebug("ajax=200 host=${url.host} language=$language")
+                if (url.host != "www.blogger.com" && url.host != "blogger.com") {
+                    videoDebug("unsupported host=${url.host}")
+                    return@withTimeoutOrNull emptyList()
                 }
-                videos += resolved
-                videoDebug("videos=${resolved.size} format=MP4")
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                videoDebug("player failed type=${e.javaClass.simpleName}")
-            }
+                val mediaHeaders = headers.newBuilder().set("Referer", "https://www.blogger.com/").build()
+                blogger.videosFromUrl(url.toString(), mediaHeaders).mapNotNull { video ->
+                    val media = video.videoUrl.toHttpUrlOrNull() ?: return@mapNotNull null
+                    if (!media.host.endsWith(".googlevideo.com") || media.encodedPath != "/videoplayback") return@mapNotNull null
+                    val quality = when (media.queryParameter("itag")) {
+                        "18" -> "360p"
+                        "22" -> "720p"
+                        "37" -> "1080p"
+                        "59", "78" -> "480p"
+                        null -> if (media.queryParameter("mime") == "video/mp4") "Unknown" else return@mapNotNull null
+                        else -> return@mapNotNull null
+                    }
+                    Video(videoUrl = video.videoUrl, videoTitle = "Blogger - $language - $quality", headers = mediaHeaders)
+                }
+            }.orEmpty().also { videoDebug("videos=${it.size} format=MP4") }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            videoDebug("player failed type=${e.javaClass.simpleName}")
+            emptyList()
         }
         return videos.distinctBy { it.videoUrl }.sortVideos()
     }
@@ -191,6 +209,8 @@ class AnimesHD : DooPlay() {
     private fun resolution(label: String) = Regex("(\\d+)p").find(label)?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
     @Serializable private class Player(@SerialName("embed_url") val url: String)
+
+    @Serializable private class PlayerOption(val post: String, val type: String, val nume: String, val label: String, val referer: String)
 
     companion object {
         private fun debug(message: String) {

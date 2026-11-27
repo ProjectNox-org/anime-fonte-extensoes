@@ -11,18 +11,20 @@ import eu.kanade.tachiyomi.animeextension.pt.funanimetv.dto.VideoByCatItemDto
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.Hoster.Companion.toHosterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
-import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toHex
 import keiyoushi.utils.toJsonString
-import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -35,7 +37,7 @@ import java.security.MessageDigest
 
 @Source
 abstract class FunAnimeTV :
-    AnimeHttpLegacySource(),
+    AnimeHttpSource(),
     ConfigurableAnimeSource {
 
     val apiUrl by lazy {
@@ -217,25 +219,26 @@ abstract class FunAnimeTV :
     }
 
     // ============================== Episodes ==============================
-    override fun episodeListRequest(anime: SAnime): Request {
-        val url = runBlocking {
-            getAnimeDetails(anime).url.toHttpUrl()
-        }
+    override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
+        val url = getAnimeDetails(anime).url.toHttpUrl()
 
         val cid = url.queryParameter("cid")
         val tid = url.queryParameter("tid")
 
+        val tidVal = tid
         val params = buildJsonObject {
             put("cat_id", cid)
             put("page", 1)
 
-            if (!tid.isNullOrBlank()) {
-                put("tid", tid)
+            if (!tidVal.isNullOrBlank()) {
+                put("tid", tidVal)
             }
         }
         val form = createRequestJson("get_video_by_cat_id", params)
 
-        return POST(apiUrl, headers, form)
+        return client.newCall(POST(apiUrl, headers, form))
+            .awaitSuccess()
+            .use(::episodeListParse)
     }
 
     override fun episodeListParse(response: Response): List<SEpisode> {
@@ -254,7 +257,7 @@ abstract class FunAnimeTV :
     }
 
     // ============================ Video Links =============================
-    override fun videoListRequest(episode: SEpisode): Request {
+    override fun hosterListRequest(episode: SEpisode): Request {
         val url = episode.url.toHttpUrl()
 
         val id = url.queryParameter("id")
@@ -267,7 +270,7 @@ abstract class FunAnimeTV :
         return POST(apiUrl, headers, form)
     }
 
-    override fun videoListParse(response: Response): List<Video> {
+    override fun hosterListParse(response: Response): List<Hoster> {
         val json = response.getByArrayKey<List<SingleVideoItemDto>>().first()
 
         val videos = mutableListOf<Video>()
@@ -285,8 +288,12 @@ abstract class FunAnimeTV :
             videos.add(Video(videoUrl = videoUrl, videoTitle = "1080p"))
         }
 
-        return videos
+        return videos.sortVideos().toHosterList()
     }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = hoster.videoList.orEmpty().sortVideos()
+
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
 
     // ============================== Settings ==============================
     override fun setupPreferenceScreen(screen: PreferenceScreen) {

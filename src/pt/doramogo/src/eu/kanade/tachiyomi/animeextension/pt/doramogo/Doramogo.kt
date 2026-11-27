@@ -7,15 +7,15 @@ import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animeextension.pt.doramogo.extractors.DoramogoExtractor
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
-import keiyoushi.utils.ParsedAnimeHttpLegacySource
-import keiyoushi.utils.catchingFlatMapBlocking
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
@@ -24,7 +24,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 @Source
-abstract class Doramogo : ParsedAnimeHttpLegacySource() {
+abstract class Doramogo : ParsedAnimeHttpSource() {
 
     override val supportsLatest = true
 
@@ -128,15 +128,27 @@ abstract class Doramogo : ParsedAnimeHttpLegacySource() {
     }
 
     // ============================ Video Links =============================
-    override fun videoListParse(response: Response): List<Video> {
-        val document = response.asJsoup()
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val document = client.newCall(GET(baseUrl + episode.url, headers))
+            .awaitSuccess()
+            .asJsoup()
 
-        val urls = document.select("div.source-box iframe[src]").map {
-            it.attr("src")
+        return document.select("div.source-box iframe[src]").mapIndexedNotNull { index, element ->
+            val url = element.attr("src").takeIf(String::isNotBlank) ?: return@mapIndexedNotNull null
+            val hosterName = when {
+                "dailymotion" in url -> "Dailymotion"
+                "ok.ru" in url -> "OkRu"
+                "drive.google.com" in url -> "Google Drive"
+                "embedrise.com" in url -> "Embedrise"
+                "streamable.com" in url -> "Streamable"
+                "/player/" in url -> "Doramogo"
+                else -> "Player ${index + 1}"
+            }
+            Hoster(hosterUrl = url, hosterName = hosterName)
         }
-
-        return urls.catchingFlatMapBlocking { getVideosFromURL(it) }
     }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = getVideosFromURL(hoster.hosterUrl).sortVideos()
 
     private val dailymotionExtractor by lazy { DailymotionExtractor(client, headers) }
     private val doramogoExtractor by lazy { DoramogoExtractor(client, headers) }
@@ -155,7 +167,7 @@ abstract class Doramogo : ParsedAnimeHttpLegacySource() {
         }
 
         "embedrise.com" in url -> {
-            val m3u8Url = client.newCall(GET(url)).execute()
+            val m3u8Url = client.newCall(GET(url)).awaitSuccess()
                 .asJsoup()
                 .selectFirst("video source")?.attr("src") ?: return emptyList()
             playlistUtils.extractFromHls(
@@ -166,7 +178,7 @@ abstract class Doramogo : ParsedAnimeHttpLegacySource() {
         }
 
         "streamable.com" in url -> {
-            val mp4Url = client.newCall(GET(url)).execute()
+            val mp4Url = client.newCall(GET(url)).awaitSuccess()
                 .asJsoup()
                 .selectFirst("video")
                 ?.attr("src")
@@ -187,9 +199,11 @@ abstract class Doramogo : ParsedAnimeHttpLegacySource() {
         else -> emptyList()
     }
 
-    override fun videoListSelector(): String = throw UnsupportedOperationException()
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
 
-    override fun videoFromElement(element: Element): Video = throw UnsupportedOperationException()
+    override fun seasonListSelector(): String = throw UnsupportedOperationException()
+
+    override fun seasonFromElement(element: Element): SAnime = throw UnsupportedOperationException()
 
     // ============================= Utilities ==============================
 

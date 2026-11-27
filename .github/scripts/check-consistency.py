@@ -645,6 +645,14 @@ def check_consistency(
         else ("BLOCKED (DETERMINISTIC_BUILD_FAILURE)" if pub_blocked_active else sync_status)
     )
 
+    ptbr_modules = [u for u in local_modules if u.startswith("src/pt/")]
+    ptbr_lib14_units = (
+        [u for u in ptbr_modules if sync_mod.read_lib_version(None, u) < 16]
+        if sync_mod and hasattr(sync_mod, "read_lib_version")
+        else []
+    )
+    ptbr_upstream_updates = sync_state.get("ptbr_upstream_updates") if isinstance(sync_state.get("ptbr_upstream_updates"), dict) else {}
+
     # Build Markdown summary
     lines = [
         "## Project Nox Anime — Consistency & Parity Status\n",
@@ -659,6 +667,13 @@ def check_consistency(
         f"| **Deployed Catalog Extensions** | {len(deployed_items)} extensions | Distribution |",
         f"| **Catalog Verification Source** | {catalog_source} | {catalog_status} |",
         f"| **Pending Upstream Units** | {len(pending_units)} units | {'NEEDS_SYNC' if pending_units else 'IN_SYNC'} |",
+        *(
+            [
+                f"| **PT-BR Lib 16 Compliance** | {len(ptbr_modules) - len(ptbr_lib14_units)}/{len(ptbr_modules)} on Lib 16 | {'OK' if not ptbr_lib14_units else 'WARNING'} |"
+            ]
+            if ptbr_modules
+            else []
+        ),
         "",
         "### 1-by-1 Upstream Parity Breakdown:\n",
         "| Parity Status | Count | Description |",
@@ -691,6 +706,19 @@ def check_consistency(
         drift_desc = ", ".join(f"{u} (local={lc} < catalog={dc})" for u, lc, dc in version_drift_units[:20])
         lines.append(f"**Version Drift Warnings ({len(version_drift_units)}):** `{drift_desc}`\n")
         print(f"::warning::VERSION_DRIFT detected: {drift_desc}")
+
+    if ptbr_lib14_units:
+        lines.append(f"**PT-BR Non-Lib-16 Warnings ({len(ptbr_lib14_units)}):** `{', '.join(ptbr_lib14_units)}`\n")
+        print(f"::warning::PTBR_LIB14_REMAINING detected: {', '.join(ptbr_lib14_units)}")
+
+    if ptbr_upstream_updates:
+        port_pending = [f"{u} ({info.get('reason', 'divergent')})" for u, info in sorted(ptbr_upstream_updates.items()) if info.get("status") == "NEEDS_LIB16_PORT"]
+        compat_merged = [u for u, info in sorted(ptbr_upstream_updates.items()) if info.get("status") == "COMPATIBLE_MERGED"]
+        if compat_merged:
+            lines.append(f"**PT-BR Compatible Upstream Merges ({len(compat_merged)}):** `{', '.join(compat_merged)}`\n")
+        if port_pending:
+            lines.append(f"**PT-BR Pending Manual Lib-16 Port ({len(port_pending)}):** `{', '.join(port_pending)}`\n")
+            print(f"::warning::PTBR_UPSTREAM_PORT_PENDING: {', '.join(port_pending)}")
 
     report = "\n".join(lines)
     print(report)

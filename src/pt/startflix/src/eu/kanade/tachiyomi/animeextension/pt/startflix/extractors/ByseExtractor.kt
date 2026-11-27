@@ -98,10 +98,10 @@ class ByseExtractor(
                 if (hlsVideos.isNotEmpty()) {
                     videoList.addAll(hlsVideos)
                 } else {
-                    videoList.add(Video(sourceUrl, videoName, sourceUrl, mediaHeaders))
+                    videoList.add(Video(videoUrl = sourceUrl, videoTitle = videoName, headers = mediaHeaders))
                 }
             } else {
-                videoList.add(Video(sourceUrl, videoName, sourceUrl, mediaHeaders))
+                videoList.add(Video(videoUrl = sourceUrl, videoTitle = videoName, headers = mediaHeaders))
             }
         }
         videoList

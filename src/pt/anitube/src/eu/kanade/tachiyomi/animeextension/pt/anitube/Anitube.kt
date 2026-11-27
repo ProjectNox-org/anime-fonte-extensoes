@@ -6,20 +6,18 @@ import eu.kanade.tachiyomi.animeextension.pt.anitube.extractors.AnitubeExtractor
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.annotation.Source
 import keiyoushi.source.CustomUrlPreferences
-import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.getPreferences
 import keiyoushi.utils.tryParse
 import keiyoushi.utils.useAsJsoup
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
@@ -31,7 +29,7 @@ import java.util.Locale
 
 @Source
 abstract class Anitube :
-    AnimeHttpLegacySource(),
+    AnimeHttpSource(),
     ConfigurableAnimeSource {
 
     override val supportsLatest = true
@@ -247,10 +245,14 @@ abstract class Anitube :
 
     override fun episodeListParse(response: Response): List<SEpisode> = throw UnsupportedOperationException()
 
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
+
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
     // ============================ Video Links =============================
     private val anitubeExtractor by lazy { AnitubeExtractor(headers, client, preferences) }
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val response = client.newCall(GET(baseUrl + episode.url, headers)).awaitSuccess()
         val document = response.useAsJsoup()
 
@@ -261,19 +263,23 @@ abstract class Anitube :
         // Always use three resolutions: 480p, 720p, 1080p (SD, HD, FHD)
         val qualities = listOf("480p", "720p", "1080p")
 
-        return coroutineScope {
-            videoElements.mapIndexed { index, element ->
-                async {
-                    val url = element.absUrl("href")
-                    val quality = qualities.getOrElse(index) { "720p" }
-                    runCatching { anitubeExtractor.getVideosFromUrl(url, quality) }
-                        .getOrElse { emptyList() }
-                }
-            }.awaitAll().flatten()
+        return videoElements.mapIndexedNotNull { index, element ->
+            val url = element.absUrl("href").takeIf(String::isNotBlank) ?: return@mapIndexedNotNull null
+            val quality = qualities.getOrElse(index) { "720p" }
+            Hoster(
+                hosterUrl = url,
+                hosterName = "Anitube - $quality",
+                internalData = quality,
+            )
         }
     }
 
-    override fun videoListParse(response: Response): List<Video> = throw UnsupportedOperationException()
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val quality = hoster.internalData.ifBlank { "720p" }
+        return runCatching { anitubeExtractor.getVideosFromUrl(hoster.hosterUrl, quality) }
+            .getOrElse { emptyList() }
+            .sortVideos()
+    }
 
     // ============================== Settings ==============================
     override fun setupPreferenceScreen(screen: PreferenceScreen) {

@@ -6,9 +6,9 @@ plugins {
 
 yuzono {
     name = "Goyabu"
-    versionCode = 9
+    versionCode = 10
     contentWarning = ContentWarning.MIXED
-    libVersion = "14"
+    libVersion = "16"
 
     source {
         lang = "pt-BR"

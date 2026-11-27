@@ -3,12 +3,15 @@ package eu.kanade.tachiyomi.animeextension.pt.dattebayobr
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.Hoster.Companion.toHosterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
-import keiyoushi.utils.AnimeHttpLegacySource
+import keiyoushi.annotation.Source
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.tryParse
@@ -21,10 +24,8 @@ import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
 
-class DattebayoBR : AnimeHttpLegacySource() {
-    override val name = "Dattebayo BR"
-    override val baseUrl = "https://www.dattebayo-br.com"
-    override val lang = "pt-BR"
+@Source
+abstract class DattebayoBR : AnimeHttpSource() {
     override val supportsLatest = true
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
@@ -216,7 +217,9 @@ class DattebayoBR : AnimeHttpLegacySource() {
     }
 
     // =============================== Videos ==============================
-    override fun videoListParse(response: Response): List<Video> {
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val targetUrl = if (episode.url.startsWith("http")) episode.url else baseUrl + episode.url
+        val response = client.newCall(GET(targetUrl, headers)).awaitSuccess()
         val document = response.useAsJsoup()
         val episodeUrl = response.request.url.toString()
 
@@ -278,7 +281,7 @@ class DattebayoBR : AnimeHttpLegacySource() {
                         }.getOrDefault(false)
 
                         return@parallelCatchingFlatMapBlocking listOf(
-                            Pair(Video(urlFinal, qualityName, urlFinal, headers = videoHeaders), isPlayable),
+                            Pair(Video(videoUrl = urlFinal, videoTitle = qualityName, headers = videoHeaders), isPlayable),
                         )
                     }
                 }
@@ -292,7 +295,14 @@ class DattebayoBR : AnimeHttpLegacySource() {
         return streamsToUse
             .sortedByDescending { qualityPriority(it.videoTitle) }
             .distinctBy { it.videoUrl }
+            .toHosterList()
     }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = hoster.videoList.orEmpty()
+
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
 
     private fun qualityPriority(quality: String): Int {
         val q = quality.uppercase()

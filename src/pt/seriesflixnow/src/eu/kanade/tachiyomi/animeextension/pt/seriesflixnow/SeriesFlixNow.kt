@@ -3,11 +3,15 @@ package eu.kanade.tachiyomi.animeextension.pt.seriesflixnow
 import android.util.Log
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.Hoster.Companion.toHosterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
-import keiyoushi.utils.ParsedAnimeHttpLegacySource
+import eu.kanade.tachiyomi.network.awaitSuccess
+import keiyoushi.annotation.Source
 import keiyoushi.utils.useAsJsoup
 import okhttp3.Request
 import okhttp3.Response
@@ -17,10 +21,8 @@ import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Locale
 
-class SeriesFlixNow : ParsedAnimeHttpLegacySource() {
-    override val name = "SeriesFlixNow"
-    override val baseUrl = "https://www.seriesflixnet.com"
-    override val lang = "pt-BR"
+@Source
+abstract class SeriesFlixNow : ParsedAnimeHttpSource() {
     override val supportsLatest = true
 
     override fun headersBuilder() = super.headersBuilder().add("Referer", "$baseUrl/")
@@ -163,7 +165,9 @@ class SeriesFlixNow : ParsedAnimeHttpLegacySource() {
         return episodes
     }
 
-    override fun videoListParse(response: Response): List<Video> {
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val episodeUrl = if (episode.url.startsWith("http")) episode.url else baseUrl + episode.url
+        val response = client.newCall(GET(episodeUrl, headers)).awaitSuccess()
         val doc = response.useAsJsoup()
         val buttons = doc.select("button.btn-canal[data-url]")
         Log.d(DEBUG_TAG, "episode=${response.request.url} channels=${buttons.size}")
@@ -190,32 +194,43 @@ class SeriesFlixNow : ParsedAnimeHttpLegacySource() {
         if (result.none { it.videoTitle.contains("Legendado", true) } && result.isNotEmpty()) {
             val legVideos = result.map { v ->
                 Video(
-                    v.videoUrl,
-                    v.videoTitle.replace("Dublado", "Legendado"),
-                    v.videoUrl,
-                    v.headers,
-                    v.subtitleTracks,
-                    v.audioTracks,
+                    videoUrl = v.videoUrl,
+                    videoTitle = v.videoTitle.replace("Dublado", "Legendado"),
+                    headers = v.headers,
+                    subtitleTracks = v.subtitleTracks,
+                    audioTracks = v.audioTracks,
                 )
             }
             result += legVideos
         }
 
         Log.d(DEBUG_TAG, "videos=${result.size}")
-        return result
+        return result.toHosterList()
     }
 
-    override fun videoListSelector() = "#player-iframe[src]"
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = hoster.videoList.orEmpty()
 
-    override fun videoFromElement(element: Element) = Video(
-        element.attr("abs:src"),
-        "SeriesFlixNow",
-        element.attr("abs:src"),
-        headers,
-    )
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
 
-    override fun videoUrlParse(response: Response) = response.useAsJsoup()
-        .selectFirst("video source[src], video[src]")?.attr("abs:src").orEmpty()
+    override fun seasonListSelector(): String = throw UnsupportedOperationException()
+
+    override fun seasonFromElement(element: Element): SAnime = throw UnsupportedOperationException()
+
+    override suspend fun resolveVideo(video: Video): Video? {
+        val resolved = client.newCall(GET(video.videoUrl, headers)).awaitSuccess().useAsJsoup()
+            .selectFirst("video source[src], video[src]")?.attr("abs:src").orEmpty()
+        return if (resolved.isNotBlank()) {
+            Video(
+                videoUrl = resolved,
+                videoTitle = video.videoTitle,
+                headers = video.headers,
+                subtitleTracks = video.subtitleTracks,
+                audioTracks = video.audioTracks,
+            )
+        } else {
+            video
+        }
+    }
 
     private val playerExtractor by lazy { SeriesFlixPlayerExtractor(client) }
 

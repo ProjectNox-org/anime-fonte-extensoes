@@ -19,13 +19,16 @@ import eu.kanade.tachiyomi.animeextension.pt.redecanais.videolist.VideoListBoots
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.Hoster.Companion.toHosterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.utils.AnimeHttpLegacySource
+import keiyoushi.annotation.Source
 import keiyoushi.utils.getPreferencesLazy
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -42,15 +45,12 @@ import org.jsoup.nodes.TextNode
 import uy.kohesive.injekt.injectLazy
 import java.text.Normalizer
 
-class RedeCanais :
-    AnimeHttpLegacySource(),
+@Source
+abstract class RedeCanais :
+    AnimeHttpSource(),
     ConfigurableAnimeSource {
 
-    override val name = "Rede Canais"
-
     override val baseUrl get() = preferences.getString(PREF_DOMAIN_KEY, PREF_DOMAIN_DEFAULT)!!
-
-    override val lang = "pt-BR"
 
     override val supportsLatest = true
 
@@ -222,57 +222,62 @@ class RedeCanais :
 
     // ============================ Video Links =============================
 
-    override fun videoListRequest(episode: SEpisode): Request {
-        val requestUrl = episode.absoluteEpisodeUrl()
-        val episodeReferer = requestUrl.toHttpUrlOrNull()?.queryParameter(PARENT_PAGE_PARAM)
-        return GET(
-            requestUrl,
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val targetUrl = episode.absoluteEpisodeUrl()
+        val episodeReferer = targetUrl.toHttpUrlOrNull()?.queryParameter(PARENT_PAGE_PARAM)
+        val request = GET(
+            targetUrl,
             headers.newBuilder()
                 .apply { episodeReferer?.let { set("Referer", it) } }
                 .set(VideoListBootstrapInterceptor.HEADER, "1")
                 .build(),
         )
+
+        return client.newCall(request).awaitSuccess().use { response ->
+            val requestUrl = response.originalRequestUrl()
+            val options = requestUrl.audioOptions()
+            val iframeUrl = response.playerIframeUrl()
+            val responsePageUrl = requestUrl.cleanAudioUrl()
+            val iframeUrls = mutableMapOf<String, String?>()
+            iframeUrl?.let { iframeUrls[responsePageUrl] = it }
+            val snifferInputs = options.map { option ->
+                val optionPageUrl = option.url.cleanAudioUrl()
+                PlayerApiSniffer.Input(
+                    parentUrl = option.url,
+                    iframeUrl = iframeUrls.getOrPut(optionPageUrl) {
+                        runCatching {
+                            client.newCall(GET(optionPageUrl, headers)).execute().use { it.playerIframeUrl() }
+                        }.getOrNull()
+                    },
+                )
+            }
+            val videos = playerApiSniffer.sniffAll(snifferInputs)
+
+            options.mapNotNull { option ->
+                val video = videos[option.url] ?: return@mapNotNull null
+                val streamUrl = videoProxy.proxiedUrl(
+                    StreamContext(
+                        url = video.url,
+                        userAgent = video.userAgent,
+                        referer = video.referer,
+                        origin = video.referer.origin(),
+                        cookie = video.cookie.takeIf { it.isNotBlank() },
+                    ),
+                )
+                Video(
+                    videoUrl = streamUrl,
+                    videoTitle = "RedeCanais - ${option.label}",
+                    headers = Headers.headersOf("User-Agent", browserUserAgent()),
+                )
+            }.toHosterList()
+        }
     }
 
-    override fun videoListParse(response: Response): List<Video> {
-        val requestUrl = response.originalRequestUrl()
-        val options = requestUrl.audioOptions()
-        val iframeUrl = response.playerIframeUrl()
-        val responsePageUrl = requestUrl.cleanAudioUrl()
-        val iframeUrls = mutableMapOf<String, String?>()
-        iframeUrl?.let { iframeUrls[responsePageUrl] = it }
-        val snifferInputs = options.map { option ->
-            val optionPageUrl = option.url.cleanAudioUrl()
-            PlayerApiSniffer.Input(
-                parentUrl = option.url,
-                iframeUrl = iframeUrls.getOrPut(optionPageUrl) {
-                    runCatching {
-                        client.newCall(GET(optionPageUrl, headers)).execute().use { it.playerIframeUrl() }
-                    }.getOrNull()
-                },
-            )
-        }
-        val videos = playerApiSniffer.sniffAll(snifferInputs)
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = hoster.videoList.orEmpty()
 
-        return options.mapNotNull { option ->
-            val video = videos[option.url] ?: return@mapNotNull null
-            val streamUrl = videoProxy.proxiedUrl(
-                StreamContext(
-                    url = video.url,
-                    userAgent = video.userAgent,
-                    referer = video.referer,
-                    origin = video.referer.origin(),
-                    cookie = video.cookie.takeIf { it.isNotBlank() },
-                ),
-            )
-            Video(
-                video.url,
-                "RedeCanais - ${option.label}",
-                streamUrl,
-                Headers.headersOf("User-Agent", browserUserAgent()),
-            )
-        }
-    }
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
 
     // ============================== Settings ==============================
 

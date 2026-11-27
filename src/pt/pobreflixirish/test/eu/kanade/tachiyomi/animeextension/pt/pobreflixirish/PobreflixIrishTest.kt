@@ -285,11 +285,11 @@ class PobreflixIrishTest {
         val dummyHeaders = Headers.headersOf()
 
         val videos = listOf(
-            Video("url1", "Legendado - 720p - VaiQueCol", "url1", dummyHeaders),
-            Video("url2", "Dublado - 480p - VaiQueCol", "url2", dummyHeaders),
-            Video("url3", "Legendado - 1080p - VidSrc", "url3", dummyHeaders),
-            Video("url4", "Dublado - 1080p - VaiQueCol", "url4", dummyHeaders),
-            Video("url5", "Dublado - 720p - Superflix", "url5", dummyHeaders),
+            Video(videoUrl = "url1", videoTitle = "Legendado - 720p - VaiQueCol", headers = dummyHeaders),
+            Video(videoUrl = "url2", videoTitle = "Dublado - 480p - VaiQueCol", headers = dummyHeaders),
+            Video(videoUrl = "url3", videoTitle = "Legendado - 1080p - VidSrc", headers = dummyHeaders),
+            Video(videoUrl = "url4", videoTitle = "Dublado - 1080p - VaiQueCol", headers = dummyHeaders),
+            Video(videoUrl = "url5", videoTitle = "Dublado - 720p - Superflix", headers = dummyHeaders),
         )
 
         // 1. Preferred Dublado + 720p

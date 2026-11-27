@@ -6,18 +6,17 @@ import eu.kanade.tachiyomi.animeextension.pt.donghuanosekai.extractors.DonghuaNo
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
-import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
-import keiyoushi.utils.ParsedAnimeHttpLegacySource
 import keiyoushi.utils.getPreferencesLazy
-import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.Serializable
 import okhttp3.FormBody
@@ -32,7 +31,7 @@ import java.util.Locale
 
 @Source
 abstract class DonghuaNoSekai :
-    ParsedAnimeHttpLegacySource(),
+    ParsedAnimeHttpSource(),
     ConfigurableAnimeSource {
 
     override val supportsLatest = true
@@ -204,19 +203,30 @@ abstract class DonghuaNoSekai :
 
     // ============================ Video Links =============================
     private val extractor by lazy { DonghuaNoSekaiExtractor(client, headers) }
-    override fun videoListParse(response: Response): List<Video> {
-        val doc = response.asJsoup()
 
-        return doc.select("div.slideItem[data-video-url]").parallelCatchingFlatMapBlocking {
-            client.newCall(GET(it.attr("data-video-url"), headers)).await()
-                .asJsoup()
-                .let(extractor::videosFromDocument)
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val doc = client.newCall(GET(baseUrl + episode.url, headers))
+            .awaitSuccess()
+            .asJsoup()
+
+        return doc.select("div.slideItem[data-video-url]").mapIndexedNotNull { index, item ->
+            val url = item.attr("data-video-url").takeIf(String::isNotBlank) ?: return@mapIndexedNotNull null
+            val name = item.text().trim().ifBlank { "Player ${index + 1}" }
+            Hoster(hosterUrl = url, hosterName = name)
         }
     }
 
-    override fun videoListSelector(): String = throw UnsupportedOperationException()
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = client.newCall(GET(hoster.hosterUrl, headers))
+        .awaitSuccess()
+        .asJsoup()
+        .let(extractor::videosFromDocument)
+        .sortVideos()
 
-    override fun videoFromElement(element: Element): Video = throw UnsupportedOperationException()
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    override fun seasonListSelector(): String = throw UnsupportedOperationException()
+
+    override fun seasonFromElement(element: Element): SAnime = throw UnsupportedOperationException()
 
     // ============================== Settings ==============================
     override fun setupPreferenceScreen(screen: PreferenceScreen) {

@@ -154,7 +154,7 @@ class AnimesROLLExtractor(private val client: OkHttpClient, private val headers:
                     )
                 } else {
                     Log.d(tag, "Found direct video: $label - ${videoUrl.take(80)}...")
-                    videos += Video(videoUrl, "$qualityPrefix - $label", videoUrl, videoHeaders)
+                    videos += Video(videoUrl = videoUrl, videoTitle = "$qualityPrefix - $label", headers = videoHeaders)
                 }
             }
             if (videos.isNotEmpty()) {
@@ -183,7 +183,7 @@ class AnimesROLLExtractor(private val client: OkHttpClient, private val headers:
                         videoHeadersGen = { _, _, _ -> videoHeaders },
                         videoNameGen = { "$qualityPrefix - $it" },
                     ).asSequence()
-                    else -> sequenceOf(Video(videoUrl, "$qualityPrefix - $quality", videoUrl, videoHeaders))
+                    else -> sequenceOf(Video(videoUrl = videoUrl, videoTitle = "$qualityPrefix - $quality", headers = videoHeaders))
                 }
             }
             .toList()
@@ -325,7 +325,7 @@ class AnimesROLLExtractor(private val client: OkHttpClient, private val headers:
                 }
                 else -> {
                     Log.d(tag, "WebView video: $label - ${videoUrl.take(80)}...")
-                    videos += Video(videoUrl, "$qualityPrefix - $label", videoUrl, videoHeaders)
+                    videos += Video(videoUrl = videoUrl, videoTitle = "$qualityPrefix - $label", headers = videoHeaders)
                 }
             }
         }

@@ -122,11 +122,11 @@ class WebPlayerExtractor(
                     videoHeaders = streamHeaders,
                     videoNameGen = { "$label - $it" },
                 ).ifEmpty {
-                    listOf(Video(resultUrl, label, resultUrl, streamHeaders))
+                    listOf(Video(videoUrl = resultUrl, videoTitle = label, headers = streamHeaders))
                 }
             }
             resultUrl.contains(".mp4", ignoreCase = true) -> {
-                listOf(Video(resultUrl, "$label - MP4", resultUrl, streamHeaders))
+                listOf(Video(videoUrl = resultUrl, videoTitle = "$label - MP4", headers = streamHeaders))
             }
             else -> emptyList()
         }

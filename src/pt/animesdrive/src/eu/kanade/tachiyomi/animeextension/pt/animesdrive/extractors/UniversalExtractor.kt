@@ -99,10 +99,9 @@ class UniversalExtractor(private val client: OkHttpClient) {
         return when {
             "m3u8" in resultUrl -> {
                 Video(
-                    resultUrl,
-                    "$prefix: HLS",
-                    resultUrl,
-                    resultHeaders,
+                    videoUrl = resultUrl,
+                    videoTitle = "$prefix: HLS",
+                    headers = resultHeaders,
                 ).let(::listOf)
             }
             "mpd" in resultUrl -> {
@@ -111,10 +110,9 @@ class UniversalExtractor(private val client: OkHttpClient) {
             }
             "mp4" in resultUrl -> {
                 Video(
-                    resultUrl,
-                    "$prefix: MP4",
-                    resultUrl,
-                    Headers.headersOf("referer", origRequestUrl),
+                    videoUrl = resultUrl,
+                    videoTitle = "$prefix: MP4",
+                    headers = Headers.headersOf("referer", origRequestUrl),
                 ).let(::listOf)
             }
             else -> emptyList()

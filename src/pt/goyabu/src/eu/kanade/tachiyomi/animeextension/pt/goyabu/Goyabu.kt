@@ -7,15 +7,15 @@ import aniyomi.lib.bloggerextractor.BloggerExtractor
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.annotation.Source
-import keiyoushi.utils.ParsedAnimeHttpLegacySource
 import keiyoushi.utils.getPreferencesLazy
-import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
 import keiyoushi.utils.useAsJsoup
@@ -37,7 +37,7 @@ private val DATE_FORMATTER by lazy {
 
 @Source
 abstract class Goyabu :
-    ParsedAnimeHttpLegacySource(),
+    ParsedAnimeHttpSource(),
     ConfigurableAnimeSource {
 
     override val supportsLatest = true
@@ -197,17 +197,23 @@ abstract class Goyabu :
     override fun episodeFromElement(element: Element) = throw UnsupportedOperationException()
 
     // ============================ Video Links =============================
-    override fun videoListParse(response: Response): List<Video> {
-        val document = response.useAsJsoup()
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val document = client.newCall(GET(baseUrl + episode.url, headers))
+            .awaitSuccess()
+            .useAsJsoup()
 
-        return document.select("[data-blogger-url-encrypted]")
-            .parallelCatchingFlatMapBlocking {
-                val encrypted = it.attr("data-blogger-url-encrypted")
-                val decoded = String(Base64.decode(encrypted, Base64.DEFAULT))
-                val reversed = decoded.reversed()
-                getVideosFromURL(reversed)
-            }
+        return document.select("[data-blogger-url-encrypted]").mapIndexedNotNull { index, element ->
+            val encrypted = element.attr("data-blogger-url-encrypted")
+            val decoded = String(Base64.decode(encrypted, Base64.DEFAULT))
+            val reversed = decoded.reversed().takeIf(String::isNotBlank) ?: return@mapIndexedNotNull null
+            Hoster(
+                hosterUrl = reversed,
+                hosterName = "Blogger ${index + 1}",
+            )
+        }
     }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = getVideosFromURL(hoster.hosterUrl).sortVideos()
 
     private val bloggerExtractor by lazy { BloggerExtractor(client) }
 
@@ -216,9 +222,11 @@ abstract class Goyabu :
         else -> emptyList()
     }
 
-    override fun videoListSelector(): String = throw UnsupportedOperationException()
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
 
-    override fun videoFromElement(element: Element): Video = throw UnsupportedOperationException()
+    override fun seasonListSelector(): String = throw UnsupportedOperationException()
+
+    override fun seasonFromElement(element: Element): SAnime = throw UnsupportedOperationException()
 
     // ============================== Settings ==============================
     override fun setupPreferenceScreen(screen: PreferenceScreen) {

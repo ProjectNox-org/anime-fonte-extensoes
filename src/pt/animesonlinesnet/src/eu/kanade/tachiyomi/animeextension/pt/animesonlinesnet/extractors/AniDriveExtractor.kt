@@ -120,7 +120,7 @@ class AniDriveExtractor(private val client: OkHttpClient, private val headers: H
                         pageUrl,
                         videoNameGen = { "$qualityPrefix - $it" },
                     ).asSequence()
-                    else -> sequenceOf(Video(videoUrl, "$qualityPrefix - $quality", videoUrl, videoHeaders))
+                    else -> sequenceOf(Video(videoUrl = videoUrl, videoTitle = "$qualityPrefix - $quality", headers = videoHeaders))
                 }
             }
             .toList()
@@ -245,7 +245,7 @@ class AniDriveExtractor(private val client: OkHttpClient, private val headers: H
                     )
                 }
                 else -> {
-                    videos += Video(videoUrl, "$qualityPrefix - $label", videoUrl, videoHeaders)
+                    videos += Video(videoUrl = videoUrl, videoTitle = "$qualityPrefix - $label", headers = videoHeaders)
                 }
             }
         }

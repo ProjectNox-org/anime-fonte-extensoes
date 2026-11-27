@@ -16,7 +16,7 @@ class NoaExtractor(private val client: OkHttpClient, private val headers: Header
                     .substringAfter(":\"")
                     .substringBefore('"')
                     .replace("\\", "")
-                listOf(Video(videoUrl, name, videoUrl, headers))
+                listOf(Video(videoUrl = videoUrl, videoTitle = name, headers = headers))
             }
 
             "sources:" in body -> {
@@ -31,7 +31,7 @@ class NoaExtractor(private val client: OkHttpClient, private val headers: Header
                             .substringAfter('"')
                             .substringBefore('"')
                             .replace("\\", "")
-                        Video(videoUrl, "$name - $label", videoUrl, headers)
+                        Video(videoUrl = videoUrl, videoTitle = "$name - $label", headers = headers)
                     }
             }
 

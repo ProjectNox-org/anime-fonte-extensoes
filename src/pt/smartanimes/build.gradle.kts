@@ -6,9 +6,9 @@ plugins {
 
 yuzono {
     name = "SmartAnimes"
-    versionCode = 3
+    versionCode = 4
     contentWarning = ContentWarning.MIXED
-    libVersion = "14"
+    libVersion = "16"
     theme = "animestream"
 
     source {

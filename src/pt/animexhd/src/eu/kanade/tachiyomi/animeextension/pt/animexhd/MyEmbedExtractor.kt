@@ -83,7 +83,7 @@ internal class MyEmbedExtractor(private val client: OkHttpClient, private val he
                                     null -> if (media.queryParameter("mime") == "video/mp4") "Unknown" else return@mapNotNull null
                                     else -> return@mapNotNull null
                                 }
-                                Video(video.videoUrl, "MyEmbed - $language - $quality (Blogger)", video.videoUrl, mediaHeaders)
+                                Video(videoUrl = video.videoUrl, videoTitle = "MyEmbed - $language - $quality (Blogger)", headers = mediaHeaders)
                             }
                         }
                         "embedplayer2.xyz" -> withContext(Dispatchers.IO) {

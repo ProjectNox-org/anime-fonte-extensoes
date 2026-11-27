@@ -6,9 +6,9 @@ plugins {
 
 yuzono {
     name = "Anitube"
-    versionCode = 33
+    versionCode = 34
     contentWarning = ContentWarning.MIXED
-    libVersion = "14"
+    libVersion = "16"
 
     source {
         lang = "pt-BR"

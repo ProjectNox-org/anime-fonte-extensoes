@@ -966,6 +966,8 @@ def bump_version_if_needed(
     disk_lib = read_lib_version(None, unit)
 
     target_lib = max(loc_lib, up_lib)
+    if is_ptbr_unit(unit) and loc_lib >= 16:
+        target_lib = max(16, target_lib)
     is_lib_upgrade = up_lib > loc_lib
     needs_disk_lib_write = target_lib > disk_lib
 
@@ -1745,6 +1747,172 @@ def validate_multisrc_compatibility() -> list[str]:
     return errors
 
 
+_LIB14_REGRESSION_MARKERS = (
+    "AnimeHttpLegacySource",
+    "ParsedAnimeHttpLegacySource",
+    "kei.plugins.extension.legacy",
+    "override fun videoListParse(",
+    "override fun videoListSelector(",
+    "override fun videoFromElement(",
+    "override fun videoUrlParse(",
+)
+
+
+def validate_ptbr_lib16_floor(
+    pre_sync_lib: dict[str, int] | None = None,
+    base_ref: str = "HEAD",
+) -> list[str]:
+    """Ensure NO src/pt/* extension is ever downgraded from libVersion >= 16 to < 16."""
+    errors: list[str] = []
+    for unit in sorted(get_all_source_units(None)):
+        if not is_ptbr_unit(unit):
+            continue
+        cur_lib = read_lib_version(None, unit)
+        if pre_sync_lib is not None and unit in pre_sync_lib:
+            floor_lib = pre_sync_lib[unit]
+        elif path_exists(base_ref, unit):
+            floor_lib = read_lib_version(base_ref, unit)
+        else:
+            floor_lib = 0
+        if floor_lib >= 16 and cur_lib < 16:
+            errors.append(f"{unit}: downgrade proibido de libVersion {floor_lib} para {cur_lib}")
+    return errors
+
+
+def _try_merge_ptbr_upstream_unit(
+    unit: str,
+    base: str,
+    upstream_ref: str,
+    local_lib: int,
+    deployed_codes: dict[str, int],
+) -> tuple[str, dict[str, object], bool]:
+    """Detect upstream edits on a migrated Lib 16 PT-BR unit and cleanly 3-way merge compatible non-build fixes."""
+    upstream_sha = git("rev-parse", upstream_ref).strip()[:10]
+    diff_out = git("diff", "--name-status", base, upstream_ref, "--", unit, check=False).strip()
+    if not diff_out:
+        return "NO_UPSTREAM_DIFF", {}, False
+
+    changed_files: list[str] = []
+    non_build_edits: list[str] = []
+    build_only: list[str] = []
+    incompatible_reasons: list[str] = []
+
+    for line in diff_out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        status = parts[0]
+        rel_path = parts[-1]
+        changed_files.append(rel_path)
+        name = Path(rel_path).name
+        if name in {"build.gradle", "build.gradle.kts"}:
+            build_only.append(rel_path)
+            continue
+        if name == "AndroidManifest.xml":
+            incompatible_reasons.append(f"altered {name}")
+            continue
+        if not status.startswith("M") or not path_exists("HEAD", rel_path) or not path_exists(base, rel_path):
+            incompatible_reasons.append(f"{status}:{rel_path}")
+            continue
+        non_build_edits.append(rel_path)
+
+    if local_lib < 16:
+        return "PRESERVED_LEGACY", {
+            "status": "PRESERVED_PROTECTED",
+            "upstream_sha": upstream_sha,
+            "files": changed_files,
+        }, False
+
+    if incompatible_reasons:
+        return "NEEDS_LIB16_PORT", {
+            "status": "NEEDS_LIB16_PORT",
+            "upstream_sha": upstream_sha,
+            "reason": "; ".join(incompatible_reasons[:3]),
+            "files": changed_files,
+        }, False
+
+    if not non_build_edits:
+        return "UPSTREAM_METADATA_ONLY", {
+            "status": "UPSTREAM_METADATA_ONLY",
+            "upstream_sha": upstream_sha,
+            "files": build_only,
+        }, False
+
+    merged_files: list[str] = []
+    staged_backups: dict[Path, bytes] = {}
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        for idx, rel_path in enumerate(non_build_edits):
+            local_file = Path(rel_path)
+            orig_bytes = local_file.read_bytes()
+            staged_backups[local_file] = orig_bytes
+
+            base_blob = subprocess.run(["git", "show", f"{base}:{rel_path}"], capture_output=True, check=False)
+            up_blob = subprocess.run(["git", "show", f"{upstream_ref}:{rel_path}"], capture_output=True, check=False)
+            if base_blob.returncode != 0 or up_blob.returncode != 0:
+                for p, content in staged_backups.items():
+                    p.write_bytes(content)
+                return "NEEDS_LIB16_PORT", {
+                    "status": "NEEDS_LIB16_PORT",
+                    "upstream_sha": upstream_sha,
+                    "reason": f"missing git blob for {rel_path}",
+                    "files": changed_files,
+                }, False
+
+            base_f = tmp / f"base_{idx}"
+            cur_f = tmp / f"cur_{idx}"
+            up_f = tmp / f"up_{idx}"
+            base_f.write_bytes(base_blob.stdout)
+            cur_f.write_bytes(orig_bytes)
+            up_f.write_bytes(up_blob.stdout)
+
+            mres = subprocess.run(
+                ["git", "merge-file", "-q", str(cur_f), str(base_f), str(up_f)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if mres.returncode != 0:
+                for p, content in staged_backups.items():
+                    p.write_bytes(content)
+                return "NEEDS_LIB16_PORT", {
+                    "status": "NEEDS_LIB16_PORT",
+                    "upstream_sha": upstream_sha,
+                    "reason": f"3-way conflict in {rel_path}",
+                    "files": changed_files,
+                }, False
+
+            merged_text = cur_f.read_text(encoding="utf-8", errors="ignore")
+            if any(marker in merged_text for marker in _LIB14_REGRESSION_MARKERS):
+                for p, content in staged_backups.items():
+                    p.write_bytes(content)
+                return "NEEDS_LIB16_PORT", {
+                    "status": "NEEDS_LIB16_PORT",
+                    "upstream_sha": upstream_sha,
+                    "reason": f"Lib 14 regression marker in {rel_path}",
+                    "files": changed_files,
+                }, False
+
+            local_file.write_bytes(cur_f.read_bytes())
+            if cur_f.read_bytes() != orig_bytes:
+                merged_files.append(rel_path)
+
+    if not merged_files:
+        return "ALREADY_COMPATIBLE", {
+            "status": "ALREADY_COMPATIBLE",
+            "upstream_sha": upstream_sha,
+            "files": changed_files,
+        }, False
+
+    for rel_path in merged_files:
+        git("add", "--", rel_path)
+    return "COMPATIBLE_MERGED", {
+        "status": "COMPATIBLE_MERGED",
+        "upstream_sha": upstream_sha,
+        "files": merged_files,
+    }, True
+
+
 def run_structural_validations() -> list[str]:
     """Run all static structural validations before invoking Gradle or pushing."""
     return (
@@ -1752,6 +1920,7 @@ def run_structural_validations() -> list[str]:
         + validate_settings_modules()
         + validate_version_catalog_references()
         + validate_multisrc_compatibility()
+        + validate_ptbr_lib16_floor(base_ref="HEAD")
     )
 
 
@@ -1988,18 +2157,47 @@ def _apply_units_inner(
 
     deleted_set = set(upstream_deleted or [])
     deletion_protection_set = set(protected_deletions or [])
-    explicit_protection_set = (
+    explicit_locked_set = (
         deletion_protection_set
-        | protected_ptbr_units
-        | get_explicit_code_protections(upstream_ref=upstream_ref)
+        | set(EXPLICIT_LOCKED_UNITS)
+        | set(get_explicit_delete_protections())
     )
+    explicit_protection_set = explicit_locked_set | protected_ptbr_units | get_explicit_code_protections(upstream_ref=upstream_ref)
     deferred_units = set((deferred_incompatibilities or {}).keys())
+    upstream_diff_entries = changed_entries(base, upstream_ref)
+    upstream_changed_units, _ = collect_units(upstream_diff_entries)
+    auto_merged_ptbr_units: set[str] = set()
+    ptbr_upstream_updates: dict[str, dict[str, object]] = {}
 
     for unit in units_to_apply:
         if unit in deferred_units:
             print(f"Deferring incompatible unit (preserving last functional state): {unit}")
             continue
-        if is_ptbr_unit(unit) and unit in protected_ptbr_units:
+        if is_ptbr_unit(unit) and (
+            unit in protected_ptbr_units
+            or (
+                pre_sync_lib.get(unit, 14) >= 16
+                and path_exists(upstream_ref, unit)
+                and read_lib_version(upstream_ref, unit) < pre_sync_lib[unit]
+            )
+        ):
+            if unit not in explicit_locked_set and unit not in deleted_set and unit in upstream_changed_units:
+                status_tag, meta, changed_merged = _try_merge_ptbr_upstream_unit(
+                    unit,
+                    base,
+                    upstream_ref,
+                    pre_sync_lib.get(unit, 14),
+                    deployed_codes,
+                )
+                if meta:
+                    ptbr_upstream_updates[unit] = meta
+                if changed_merged:
+                    auto_merged_ptbr_units.add(unit)
+                    print(f"PT-BR Lib {pre_sync_lib.get(unit, 16)} compatible merge: {unit} ({', '.join(meta.get('files', []))})")
+                    continue
+                if status_tag == "NEEDS_LIB16_PORT":
+                    print(f"::warning::PT-BR upstream update on {unit} requires manual Lib 16 port ({meta.get('reason', 'conflict')}); Nox Lib 16 code preserved.")
+                    continue
             print(f"Preserving protected/customized PT-BR unit: {unit}")
             continue
         if unit in deletion_protection_set:
@@ -2032,6 +2230,9 @@ def _apply_units_inner(
                 print(f"Preserving protected Nox code on conflict: {unit}")
                 continue
         else:
+            if is_ptbr_unit(unit) and pre_sync_lib.get(unit, 14) >= 16 and path_exists(upstream_ref, unit) and read_lib_version(upstream_ref, unit) < pre_sync_lib[unit]:
+                print(f"Blocking Lib {pre_sync_lib[unit]} -> Lib {read_lib_version(upstream_ref, unit)} downgrade on {unit}")
+                continue
             # Common upstream unit (or structural theme)
             print(f"Applying {unit}")
             git("rm", "-rf", "--ignore-unmatch", "--quiet", "--", unit)
@@ -2080,8 +2281,24 @@ def _apply_units_inner(
             bumped.append(f"{unit} → {new_raw}")
             print(f"Version guard: bumped {unit} ({loc_raw} → {new_raw})")
 
+    for unit in sorted(auto_merged_ptbr_units):
+        deployed_code = deployed_codes.get(unit, 0)
+        eff = effective_version(None, unit)
+        if eff is not None:
+            _, cur_base, disk_eff = eff
+            target_eff = max(disk_eff + 1, deployed_code + 1)
+            new_raw = target_eff - cur_base
+            kts_path = Path(f"{unit}/build.gradle.kts")
+            if kts_path.exists():
+                text = kts_path.read_text(encoding="utf-8")
+                if re.search(r'(versionCode|overrideVersionCode)\s*=\s*\d+', text):
+                    text = re.sub(r'(versionCode|overrideVersionCode)\s*=\s*\d+', rf'\g<1> = {new_raw}', text, count=1)
+                    kts_path.write_text(text, encoding="utf-8")
+                    git("add", "--", str(kts_path))
+                    bumped.append(f"{unit} → {new_raw}")
+
     # Static structural validation BEFORE staging sync-state as validated (when Gradle workspace files exist)
-    structural_errors = run_structural_validations() if (SETTINGS_FILE.is_file() or LIBS_CATALOG_FILE.is_file()) else []
+    structural_errors = (run_structural_validations() + validate_ptbr_lib16_floor(pre_sync_lib=pre_sync_lib)) if (SETTINGS_FILE.is_file() or LIBS_CATALOG_FILE.is_file()) else validate_ptbr_lib16_floor(pre_sync_lib=pre_sync_lib)
     if structural_errors:
         print("Structural validation failed:", file=sys.stderr)
         for err in structural_errors:
@@ -2107,12 +2324,19 @@ def _apply_units_inner(
         "sync_status": "PARTIAL_DEFERRED" if deferred_incompatibilities else "VALIDATED",
         "blocked_candidate": None,
         "publication_block": None,
+        "ptbr_upstream_updates": ptbr_upstream_updates,
     }
     save_sync_state(sync_state)
     git("add", "--", str(SYNC_STATE_FILE))
 
     # Verify protected/customized PT-BR snapshot integrity: MUST be 100% byte-for-byte identical
-    verify_ptbr_unchanged(pre_ptbr_snapshot, units=protected_ptbr_units)
+    # (excluding units where a compatible Lib 16 non-build patch explicitly succeeded cleanly)
+    checked_protected_units = protected_ptbr_units - auto_merged_ptbr_units
+    filtered_pre_ptbr_snapshot = {
+        k: v for k, v in pre_ptbr_snapshot.items()
+        if "/".join(k.split("/")[:3]) in checked_protected_units
+    }
+    verify_ptbr_unchanged(filtered_pre_ptbr_snapshot, units=checked_protected_units)
 
     git("diff", "--check")
 
@@ -2182,6 +2406,14 @@ def write_step_summary(
                 lines.append(f"- `{u}` — kept Nox code, bumped to `{tag.split('→')[1].strip()}`\n")
             else:
                 lines.append(f"- `{u}` — kept Nox code, version already ahead\n")
+        lines.append("\n")
+    ptbr_updates = load_sync_state().get("ptbr_upstream_updates")
+    if isinstance(ptbr_updates, dict) and ptbr_updates:
+        lines.append("### PT-BR Upstream Change Tracking (Lib 16 Preserved)\n\n")
+        for u, info in sorted(ptbr_updates.items()):
+            st = info.get("status", "UNKNOWN")
+            reason = f" ({info['reason']})" if info.get("reason") else ""
+            lines.append(f"- `{u}` — `{st}`{reason}\n")
         lines.append("\n")
     with open(path, "a", encoding="utf-8") as f:
         f.writelines(lines)

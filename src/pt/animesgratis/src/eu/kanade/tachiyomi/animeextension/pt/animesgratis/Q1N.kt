@@ -13,11 +13,14 @@ import eu.kanade.tachiyomi.animeextension.pt.animesgratis.extractors.NoaExtracto
 import eu.kanade.tachiyomi.animeextension.pt.animesgratis.extractors.RuplayExtractor
 import eu.kanade.tachiyomi.animeextension.pt.animesgratis.extractors.UniversalExtractor
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.multisrc.dooplay.DooPlay
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.awaitSuccess
+import keiyoushi.annotation.Source
 import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.useAsJsoup
 import kotlinx.serialization.json.Json
@@ -31,15 +34,10 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
-class Q1N : DooPlay() {
-    override val lang = "pt-BR"
-    override val name = "TopAnimes"
-    override val baseUrl = "https://topanimes.net"
-
+@Source
+abstract class Q1N : DooPlay() {
     private val tag by lazy { javaClass.simpleName }
     private val json = Json { ignoreUnknownKeys = true }
-
-    override val id: Long = 2969482460524685571L
 
     override val dateFormatter by lazy {
         SimpleDateFormat("dd/MM/yy", Locale("pt", "BR"))
@@ -157,14 +155,27 @@ class Q1N : DooPlay() {
     }
 
     // ============================ Video Links =============================
-    override fun videoListParse(response: Response): List<Video> {
-        val document = response.useAsJsoup()
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val document = client.newCall(GET(baseUrl + episode.url, headers))
+            .awaitSuccess()
+            .useAsJsoup()
         val players = document.select("ul#playeroptionsul li")
             .filterNot { getPlayerUrl(it)?.contains("/off/", ignoreCase = true) == true }
             .distinctBy { getPlayerUrl(it) ?: "player:${it.attr("data-nume")}" }
-        return players.parallelCatchingFlatMapBlocking(::getPlayerVideos)
-            .let(m3u8Integration::processVideoList)
+        return players.mapNotNull { player ->
+            val name = player.selectFirst("span.title")?.text()?.trim().orEmpty()
+            val url = getPlayerUrl(player) ?: return@mapNotNull null
+            Hoster(
+                hosterUrl = url,
+                hosterName = name.ifBlank { "Player" },
+                internalData = name,
+            )
+        }
     }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = getPlayerVideos(hoster.hosterUrl, hoster.internalData.ifBlank { hoster.hosterName })
+        .let(m3u8Integration::processVideoList)
+        .sortVideos()
 
     override val prefQualityValues = arrayOf("360p", "480p", "720p", "1080p")
     override val prefQualityEntries = prefQualityValues
@@ -181,10 +192,8 @@ class Q1N : DooPlay() {
     private val universalExtractor by lazy { UniversalExtractor(client) }
     private val latestAnimeCache = ConcurrentHashMap<String, SAnime>()
 
-    private suspend fun getPlayerVideos(player: Element): List<Video> {
-        val name = player.selectFirst("span.title")!!.text()
+    private suspend fun getPlayerVideos(url: String, name: String): List<Video> {
         val lower = name.lowercase()
-        val url = getPlayerUrl(player) ?: return emptyList()
 
         val extractor = when {
             "ruplay" in lower -> "Ruplay"

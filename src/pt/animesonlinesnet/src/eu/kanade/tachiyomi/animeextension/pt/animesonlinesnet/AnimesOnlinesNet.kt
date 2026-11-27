@@ -9,13 +9,15 @@ import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.utils.ParsedAnimeHttpLegacySource
+import keiyoushi.annotation.Source
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
@@ -24,15 +26,10 @@ import org.jsoup.nodes.Element
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 
-class AnimesOnlinesNet :
-    ParsedAnimeHttpLegacySource(),
+@Source
+abstract class AnimesOnlinesNet :
+    ParsedAnimeHttpSource(),
     ConfigurableAnimeSource {
-
-    override val name = "AnimesOnlines Net"
-
-    override val baseUrl = "https://animesonlines.net"
-
-    override val lang = "pt-BR"
 
     override val supportsLatest = true
 
@@ -303,23 +300,27 @@ class AnimesOnlinesNet :
     override fun episodeFromElement(element: Element): SEpisode = throw UnsupportedOperationException()
 
     // ============================ Video Links =============================
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val doc = client.newCall(GET(baseUrl + episode.url, headers)).awaitSuccess().asJsoup()
         val iframeUrl = doc.selectFirst("div.anime-player-wrap iframe, iframe[src*='anidrive']")?.attr("src")
             ?: doc.selectFirst("iframe")?.attr("src")
             ?: return emptyList()
 
         val fullIframeUrl = if (iframeUrl.startsWith("//")) "https:$iframeUrl" else iframeUrl
-
-        return when {
-            "anidrive.click" in fullIframeUrl -> aniDriveExtractor.videosFromUrl(fullIframeUrl)
-            else -> emptyList()
+        return if ("anidrive.click" in fullIframeUrl) {
+            listOf(Hoster(hosterUrl = fullIframeUrl, hosterName = "AniDrive"))
+        } else {
+            emptyList()
         }
     }
 
-    override fun videoListSelector(): String = throw UnsupportedOperationException()
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = aniDriveExtractor.videosFromUrl(hoster.hosterUrl).sortVideos()
 
-    override fun videoFromElement(element: Element): Video = throw UnsupportedOperationException()
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    override fun seasonListSelector(): String = throw UnsupportedOperationException()
+
+    override fun seasonFromElement(element: Element): SAnime = throw UnsupportedOperationException()
 
     override fun List<Video>.sortVideos(): List<Video> {
         val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!

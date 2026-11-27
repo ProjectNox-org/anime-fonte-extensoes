@@ -10,5 +10,7 @@ src/pt/berryanimes
 src/pt/animy
 src/pt/animefire
 src/pt/animeito
+src/pt/animeplayer
+src/pt/animesdigital
 src/pt/animesdrive
 src/pt/dattebayobr

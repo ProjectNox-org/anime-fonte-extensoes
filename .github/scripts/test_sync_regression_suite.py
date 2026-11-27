@@ -617,6 +617,60 @@ class SyncRegressionSuiteTest(unittest.TestCase):
         self.assertIn("eu.kanade.tachiyomi.animeextension.pt.legacy", data)
         self.assertEqual(data["eu.kanade.tachiyomi.animeextension.all.modern"][0]["id"], "123456")
 
+    # 17. Targeted PT-BR policy: sync unmodified/new PT-BR with monotonic deployed guard, preserve custom/protected
+    def test_17_targeted_ptbr_syncs_unmodified_and_new_while_protecting_custom(self):
+        upstream, _, local = self._init_bare_and_pair("t17")
+        # Upstream initially has two PT-BR sources: src/pt/unmod (tracked cleanly) and src/pt/custom (modified later by Nox)
+        for slug, vc in (("unmod", 2), ("custom", 3)):
+            d = upstream / f"src/pt/{slug}"
+            d.mkdir(parents=True)
+            (d / "build.gradle.kts").write_text(f'yuzono {{\n    libVersion = "16"\n    versionCode = {vc}\n}}\n')
+            (d / f"{slug.title()}.kt").write_text(f"class {slug.title()} // v1\n", encoding="utf-8")
+        _git(upstream, "add", "-A")
+        _git(upstream, "commit", "-m", "Add upstream PT-BR sources")
+        _git(local, "fetch", "upstream", "master")
+        # Copy both into local cleanly + Nox customizes src/pt/custom and mass-bumps src/pt/unmod
+        import shutil
+        for slug in ("unmod", "custom"):
+            shutil.copytree(upstream / f"src/pt/{slug}", local / f"src/pt/{slug}")
+        (local / "src/pt/custom/Custom.kt").write_text("class Custom // Nox fix!\n", encoding="utf-8")
+        (local / "src/pt/unmod/build.gradle.kts").write_text('yuzono {\n    libVersion = "16"\n    versionCode = 5\n}\n')
+        _git(local, "add", "-A")
+        _git(local, "commit", "-m", "Local PT-BR state")
+
+        # Now upstream updates src/pt/unmod, src/pt/custom, and adds brand-new src/pt/brandnew
+        (upstream / "src/pt/unmod/Unmod.kt").write_text("class Unmod // upstream v2 fix\n", encoding="utf-8")
+        (upstream / "src/pt/unmod/build.gradle.kts").write_text('yuzono {\n    libVersion = "16"\n    versionCode = 3\n}\n')
+        (upstream / "src/pt/custom/Custom.kt").write_text("class Custom // upstream overwrite attempt\n", encoding="utf-8")
+        bn = upstream / "src/pt/brandnew"
+        bn.mkdir(parents=True)
+        (bn / "build.gradle.kts").write_text('yuzono {\n    libVersion = "16"\n    versionCode = 1\n}\n')
+        (bn / "BrandNew.kt").write_text("class BrandNew\n", encoding="utf-8")
+        _git(upstream, "add", "-A")
+        _git(upstream, "commit", "-m", "Upstream PT-BR updates + new PT-BR source")
+        _git(local, "fetch", "upstream", "master")
+
+        os.chdir(local)
+        self.assertFalse(sync.is_ptbr_unit_protected("src/pt/unmod", "upstream/master"))
+        self.assertFalse(sync.is_ptbr_unit_protected("src/pt/brandnew", "upstream/master"))
+        self.assertTrue(sync.is_ptbr_unit_protected("src/pt/custom", "upstream/master"))
+        self.assertTrue(sync.is_ptbr_unit_protected("src/pt/prot", "upstream/master"))
+        self.assertTrue(sync.is_ptbr_unit_protected("src/pt/noxonly", "upstream/master"))
+
+        # Simulate deployed catalog having unmod ahead (code 7 -> must bump to 8, never downgrade!)
+        deployed = {"src/pt/unmod": 7}
+        with patch.object(sync, "fetch_deployed_version_codes", return_value=deployed), \
+             patch.object(sync, "get_publish_pending_units", return_value=([], None, False, "file", None)), \
+             patch.object(sys, "argv", ["sync-upstream.py", "--apply-no-push"]):
+            sync.main()
+
+        self.assertIn("upstream v2 fix", (local / "src/pt/unmod/Unmod.kt").read_text("utf-8"))
+        self.assertIn("versionCode = 8", (local / "src/pt/unmod/build.gradle.kts").read_text("utf-8"))
+        self.assertTrue((local / "src/pt/brandnew/BrandNew.kt").is_file())
+        self.assertEqual((local / "src/pt/custom/Custom.kt").read_text("utf-8"), "class Custom // Nox fix!\n")
+        self.assertIn("Nox PT-BR", (local / "src/pt/prot/Prot.kt").read_text("utf-8"))
+        self.assertTrue((local / "src/pt/noxonly/NoxOnly.kt").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

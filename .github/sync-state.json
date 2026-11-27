@@ -2,8 +2,8 @@
   "upstream_sha": "863f99089bdec84b4f743da0d040a2e2f4064c3c",
   "last_validated_upstream_sha": "863f99089bdec84b4f743da0d040a2e2f4064c3c",
   "upstream_branch": "master",
-  "synced_at": "2026-11-26T14:28:42.280754+00:00",
-  "base_sha": "ad058aaf9cf99c4eed74a8cd6cff7b9ec3ec52eb",
+  "synced_at": "2026-11-27T16:36:34.083639+00:00",
+  "base_sha": "863f99089bdec84b4f743da0d040a2e2f4064c3c",
   "sync_status": "VALIDATED",
   "blocked_candidate": null,
   "publication_block": null

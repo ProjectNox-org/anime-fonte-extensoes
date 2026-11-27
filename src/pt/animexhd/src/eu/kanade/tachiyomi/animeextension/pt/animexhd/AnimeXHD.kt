@@ -5,6 +5,8 @@ import eu.kanade.tachiyomi.animeextension.BuildConfig
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.Hoster.Companion.toHosterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
@@ -12,13 +14,13 @@ import eu.kanade.tachiyomi.multisrc.dooplay.DooPlay
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.SerialName
@@ -31,10 +33,8 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 
-class AnimeXHD : DooPlay() {
-    override val lang = "pt-BR"
-    override val name = "AnimeXHD"
-    override val baseUrl = "https://animexhd.xyz"
+@Source
+abstract class AnimeXHD : DooPlay() {
     override val fetchGenres = false
     override val prefQualityKey = "quality_selection"
     override val prefQualityDefault = "best"
@@ -191,14 +191,17 @@ class AnimeXHD : DooPlay() {
     private fun parseDate(text: String?) = synchronized(dateFormat) { dateFormat.tryParse(text?.replace(".", "")) }
 
     private val myEmbed by lazy { MyEmbedExtractor(client, headers) }
-    override fun videoListParse(response: Response): List<Video> {
-        val doc = response.asJsoup()
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val episodeUrl = if (episode.url.startsWith("http")) episode.url else baseUrl + episode.url
+        val doc = client.newCall(GET(episodeUrl, headers)).awaitSuccess().asJsoup()
         val frames = doc.select(".source-box iframe[src]").map { it.absUrl("src") }.distinct()
         videoDebug("iframes=${frames.size}")
-        val videos = frames.flatMap { frame -> runBlocking { myEmbed.videosFromUrl(frame) } }
+        val videos = frames.flatMap { frame -> myEmbed.videosFromUrl(frame) }
         if (videos.isEmpty()) error("MyEmbed não ofereceu vídeo reproduzível. O servidor desta obra pode estar indisponível.")
-        return videos.distinctBy { it.videoUrl }.sortVideos()
+        return videos.distinctBy { it.videoUrl }.sortVideos().toHosterList()
     }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = hoster.videoList.orEmpty().sortVideos()
 
     override fun List<Video>.sortVideos(): List<Video> {
         val preferred = preferences.getString(prefQualityKey, prefQualityDefault).orEmpty()

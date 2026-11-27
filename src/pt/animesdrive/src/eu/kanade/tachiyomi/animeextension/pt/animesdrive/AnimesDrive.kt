@@ -5,6 +5,8 @@ import eu.kanade.tachiyomi.animeextension.pt.animesdrive.extractors.UniversalExt
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.Hoster.Companion.toHosterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
@@ -12,6 +14,7 @@ import eu.kanade.tachiyomi.multisrc.dooplay.DooPlay
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.parseAs
@@ -21,6 +24,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
@@ -32,10 +37,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorCompletionService
 import java.util.concurrent.Executors
 
-class AnimesDrive : DooPlay() {
-    override val name = "Animes Drive"
-    override val baseUrl = "https://animesdrive.online"
-    override val lang = "pt-BR"
+@Source
+abstract class AnimesDrive : DooPlay() {
 
     // ============================== Popular ===============================
     override fun popularAnimeSelector() = "article.item.tvshows, article.item.movies, article.item"
@@ -497,24 +500,66 @@ class AnimesDrive : DooPlay() {
         ?: url.toHttpUrlOrNull()?.pathSegments?.lastOrNull()?.substringBeforeLast("-episodio-")
 
     // ============================ Video Links =============================
-    override fun videoListParse(response: Response): List<Video> {
-        val document = response.useAsJsoup()
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val episodeUrl = "$baseUrl${episode.url}"
+        val document = client.newCall(GET(episodeUrl, headers))
+            .awaitSuccess()
+            .useAsJsoup()
         val players = document.select("ul#playeroptionsul li")
-        if (players.isNotEmpty()) return players.parallelCatchingFlatMapBlocking(::getPlayerVideos)
+        if (players.isNotEmpty()) {
+            return players.mapNotNull { player ->
+                val rawName = player.selectFirst("span.title")?.text().orEmpty()
+                val name = when (rawName.uppercase()) {
+                    "SD" -> "360p"
+                    "HD", "SD/HD", "SD / HD" -> "720p"
+                    "FHD", "FULLHD", "FULLHD / HLS" -> "1080p"
+                    else -> rawName
+                }
+                val payload = PlayerOptionPayload(
+                    type = player.attr("data-type"),
+                    post = player.attr("data-post"),
+                    nume = player.attr("data-nume"),
+                    label = name,
+                )
+                if (payload.post.isBlank() || payload.nume.isBlank()) return@mapNotNull null
+                Hoster(
+                    hosterUrl = episodeUrl,
+                    hosterName = name.ifBlank { "Player" },
+                    internalData = Json.encodeToString(payload),
+                )
+            }
+        }
 
         val sourceEntries = document.select("[data-animeq-player] [data-animeq-source]").map { source ->
-            SourceEntry(source, response.request.url.toString())
+            SourceEntry(source, episodeUrl)
         }
         val fastSources = sourceEntries.filter { it.sourceType() in FAST_SOURCE_TYPES }
         val slowSources = sourceEntries - fastSources.toSet()
         val fastVideos = fastSources.parallelCatchingFlatMapBlocking(::extractSourceVideos)
 
-        if (fastVideos.isNotEmpty()) {
-            return fastVideos
+        val resolved = if (fastVideos.isNotEmpty()) {
+            fastVideos
+        } else {
+            extractFirstValidatedSlowSource(slowSources)
         }
-
-        return extractFirstValidatedSlowSource(slowSources)
+        return resolved.sortVideos().toHosterList()
     }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        if (hoster.videoList != null) {
+            return hoster.videoList.orEmpty().sortVideos()
+        }
+        val payload = hoster.internalData.parseAs<PlayerOptionPayload>()
+        return getPlayerVideos(payload).sortVideos()
+    }
+
+    @Serializable
+    data class PlayerOptionPayload(
+        val type: String,
+        val post: String,
+        val nume: String,
+        val label: String,
+    )
 
     private suspend fun extractSourceVideos(entry: SourceEntry): List<Video> {
         val source = entry.element
@@ -532,10 +577,9 @@ class AnimesDrive : DooPlay() {
         val extracted = when {
             !videoUrl.isNullOrBlank() -> listOf(
                 Video(
-                    videoUrl,
-                    name,
-                    videoUrl,
-                    directHeaders(episodeUrl)
+                    videoUrl = videoUrl,
+                    videoTitle = name,
+                    headers = directHeaders(episodeUrl)
                         .add("Accept", "*/*")
                         .build(),
                 ),
@@ -712,19 +756,9 @@ class AnimesDrive : DooPlay() {
     private val bloggerExtractor by lazy { BloggerExtractor(client) }
     private val universalExtractor by lazy { UniversalExtractor(client) }
 
-    private suspend fun getPlayerVideos(player: Element): List<Video> {
-        val name = player.selectFirst("span.title")!!.text()
-            .run {
-                when (this.uppercase()) {
-                    "SD" -> "360p"
-                    "HD" -> "720p"
-                    "SD/HD", "SD / HD" -> "720p"
-                    "FHD", "FULLHD", "FULLHD / HLS" -> "1080p"
-                    else -> this
-                }
-            }
-
-        val url = getPlayerUrl(player)
+    private suspend fun getPlayerVideos(payload: PlayerOptionPayload): List<Video> {
+        val name = payload.label
+        val url = getPlayerUrl(payload)
 
         val videos = when {
             "blogger.com" in url -> bloggerExtractor.videosFromUrl(url, headers)
@@ -740,7 +774,7 @@ class AnimesDrive : DooPlay() {
                     .build()
 
                 return listOf(
-                    Video(videoUrl, name, videoUrl, videoHeaders),
+                    Video(videoUrl = videoUrl, videoTitle = name, headers = videoHeaders),
                 )
             }
 
@@ -753,16 +787,11 @@ class AnimesDrive : DooPlay() {
         return videos
     }
 
-    private suspend fun getPlayerUrl(player: Element): String {
-        val type = player.attr("data-type")
-        val id = player.attr("data-post")
-        val num = player.attr("data-nume")
-        return client.newCall(GET("$baseUrl/wp-json/dooplayer/v2/$id/$type/$num"))
-            .awaitSuccess().bodyString()
-            .substringAfter("\"embed_url\":\"")
-            .substringBefore("\",")
-            .replace("\\", "")
-    }
+    private suspend fun getPlayerUrl(payload: PlayerOptionPayload): String = client.newCall(GET("$baseUrl/wp-json/dooplayer/v2/${payload.post}/${payload.type}/${payload.nume}"))
+        .awaitSuccess().bodyString()
+        .substringAfter("\"embed_url\":\"")
+        .substringBefore("\",")
+        .replace("\\", "")
 
     // ============================== Filters ===============================
     @Volatile

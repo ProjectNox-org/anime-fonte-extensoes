@@ -4,6 +4,7 @@ import aniyomi.lib.bloggerextractor.BloggerExtractor
 import eu.kanade.tachiyomi.animeextension.pt.animeplay.extractors.UniversalExtractor
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
@@ -13,17 +14,17 @@ import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.annotation.Source
 import keiyoushi.utils.bodyString
-import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.useAsJsoup
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import okhttp3.FormBody
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
-import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
@@ -131,50 +132,66 @@ abstract class AnimePlay : DooPlay() {
     }
 
     // ============================ Video Links =============================
-    override fun videoListParse(response: Response): List<Video> {
-        val document = response.useAsJsoup()
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val episodeUrl = "$baseUrl${episode.url}"
+        val document = client.newCall(GET(episodeUrl, headers))
+            .awaitSuccess()
+            .useAsJsoup()
         val players = document.select("ul#playeroptionsul li")
-        val episodeUrl = response.request.url.toString()
-        return players.parallelCatchingFlatMapBlocking { getPlayerVideos(it, episodeUrl) }
+        return players.mapNotNull { player ->
+            val title = player.selectFirst("span.title")?.text()?.trim().orEmpty()
+            val normalizedName = when (title.uppercase()) {
+                "SD" -> "360p"
+                "HD", "SD/HD", "SD / HD" -> "720p"
+                "FHD", "FULLHD", "FULLHD / HLS" -> "1080p"
+                else -> title
+            }
+            val payload = PlayerHosterPayload(
+                post = player.attr("data-post"),
+                nume = player.attr("data-nume"),
+                type = player.attr("data-type"),
+                label = normalizedName,
+            )
+            if (payload.post.isBlank() || payload.nume.isBlank()) return@mapNotNull null
+            Hoster(
+                hosterUrl = episodeUrl,
+                hosterName = normalizedName.ifBlank { "Player" },
+                internalData = Json.encodeToString(payload),
+            )
+        }
+    }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val payload = hoster.internalData.parseAs<PlayerHosterPayload>()
+        return getPlayerVideos(payload, hoster.hosterUrl).sortVideos()
     }
 
     private val bloggerExtractor by lazy { BloggerExtractor(client) }
     private val universalExtractor by lazy { UniversalExtractor(client) }
 
-    private suspend fun getPlayerVideos(player: Element, episodeUrl: String): List<Video> {
-        val name = player.selectFirst("span.title")!!.text()
-            .run {
-                when (this.uppercase()) {
-                    "SD" -> "360p"
-                    "HD" -> "720p"
-                    "SD/HD", "SD / HD" -> "720p"
-                    "FHD", "FULLHD", "FULLHD / HLS" -> "1080p"
-                    else -> this
-                }
-            }
-
-        val playerUrl = getPlayerUrl(player, episodeUrl).takeIf(String::isNotBlank)
+    private suspend fun getPlayerVideos(payload: PlayerHosterPayload, episodeUrl: String): List<Video> {
+        val playerUrl = getPlayerUrl(payload, episodeUrl).takeIf(String::isNotBlank)
             ?: return emptyList()
         val requestHeaders = headersWithReferer(episodeUrl)
 
         val videos = when {
             "blogger.com" in playerUrl -> bloggerExtractor.videosFromUrl(playerUrl, requestHeaders)
-            playerUrl.contains("jwplayer", ignoreCase = true) -> videosFromJwPlayer(playerUrl, episodeUrl, name)
+            playerUrl.contains("jwplayer", ignoreCase = true) -> videosFromJwPlayer(playerUrl, episodeUrl, payload.label)
             else -> emptyList()
         }
 
         if (videos.isEmpty()) {
-            return universalExtractor.videosFromUrl(playerUrl, requestHeaders, name)
+            return universalExtractor.videosFromUrl(playerUrl, requestHeaders, payload.label)
         }
         return videos
     }
 
-    private suspend fun getPlayerUrl(player: Element, episodeUrl: String): String {
+    private suspend fun getPlayerUrl(payload: PlayerHosterPayload, episodeUrl: String): String {
         val body = FormBody.Builder()
             .add("action", "doo_player_ajax")
-            .add("post", player.attr("data-post"))
-            .add("nume", player.attr("data-nume"))
-            .add("type", player.attr("data-type"))
+            .add("post", payload.post)
+            .add("nume", payload.nume)
+            .add("type", payload.type)
             .build()
 
         return client.newCall(POST("$baseUrl/wp-admin/admin-ajax.php", ajaxHeaders(episodeUrl), body))
@@ -189,7 +206,7 @@ abstract class AnimePlay : DooPlay() {
             ?: getJwPlayerFile(playerUrl, episodeUrl)
             ?: return emptyList()
 
-        return listOf(Video(videoUrl, name, videoUrl, videoHeaders(playerUrl, videoUrl)))
+        return listOf(Video(videoUrl = videoUrl, videoTitle = name, headers = videoHeaders(playerUrl, videoUrl)))
     }
 
     private suspend fun getJwPlayerFile(playerUrl: String, episodeUrl: String): String? {
@@ -353,6 +370,14 @@ abstract class AnimePlay : DooPlay() {
         // ex: ".../file-200x300.jpg" -> ".../file.jpg"
         return url.replace(REGEX_IMAGE_SIZE_SUFFIX, "")
     }
+
+    @Serializable
+    data class PlayerHosterPayload(
+        val post: String,
+        val nume: String,
+        val type: String,
+        val label: String,
+    )
 
     @Serializable
     data class PlayerDto(

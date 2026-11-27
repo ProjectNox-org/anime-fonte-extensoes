@@ -8,6 +8,8 @@ import eu.kanade.tachiyomi.animeextension.pt.startflix.extractors.ByseExtractor
 import eu.kanade.tachiyomi.animeextension.pt.startflix.extractors.WebPlayerExtractor
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
+import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.Hoster.Companion.toHosterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
@@ -15,6 +17,7 @@ import eu.kanade.tachiyomi.multisrc.dooplay.DooPlay
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.annotation.Source
 import keiyoushi.utils.firstInstanceOrNull
 import okhttp3.Request
 import okhttp3.Response
@@ -23,10 +26,8 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
-class Startflix : DooPlay() {
-    override val lang = "pt-BR"
-    override val name = "Startflix"
-    override val baseUrl = "https://www.startflix.biz"
+@Source
+abstract class Startflix : DooPlay() {
 
     override val supportsLatest = true
 
@@ -282,7 +283,7 @@ class Startflix : DooPlay() {
 
     // ============================ Video Links =============================
 
-    override fun videoListRequest(episode: SEpisode): Request {
+    private fun episodePanelRequest(episode: SEpisode): Request {
         val fullUrl = if (episode.url.startsWith("http")) {
             episode.url
         } else if (episode.url.startsWith("/episodio/") || episode.url.startsWith("/filme/")) {
@@ -293,10 +294,8 @@ class Startflix : DooPlay() {
         return GET(fullUrl, headers.newBuilder().set("Referer", "$baseUrl/").build())
     }
 
-    override fun videoListParse(response: Response): List<Video> = throw UnsupportedOperationException()
-
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        val request = videoListRequest(episode)
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val request = episodePanelRequest(episode)
         val response = client.newCall(request).awaitSuccess()
         val requestUrl = response.request.url.toString()
         val panelDoc: Document = if (requestUrl.contains("startflix.biz")) {
@@ -354,8 +353,10 @@ class Startflix : DooPlay() {
         if (videos.isEmpty()) {
             error("Nenhum servidor compatível com reprodução nativa disponível. Abra o episódio na WebView para assistir pelo player do site.")
         }
-        return videos.distinctBy { it.videoUrl }.sortVideos()
+        return videos.distinctBy { it.videoUrl }.sortVideos().toHosterList()
     }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = hoster.videoList.orEmpty().sortVideos()
 
     private suspend fun extractVideosFromPlayer(sourceUrl: String, label: String): List<Video> = runCatching {
         when {
@@ -408,7 +409,7 @@ class Startflix : DooPlay() {
 
             // 6. Direct MP4
             sourceUrl.contains(".mp4", ignoreCase = true) -> {
-                listOf(Video(sourceUrl, label, sourceUrl, headers))
+                listOf(Video(videoUrl = sourceUrl, videoTitle = label, headers = headers))
             }
 
             // 7. Known incompatible hosts (Abyss/playembedapi relies on client-side ServiceWorker chunk assembly,

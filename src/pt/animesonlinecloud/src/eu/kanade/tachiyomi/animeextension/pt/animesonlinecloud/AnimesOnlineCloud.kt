@@ -4,20 +4,22 @@ import aniyomi.lib.bloggerextractor.BloggerExtractor
 import eu.kanade.tachiyomi.animeextension.pt.animesonlinecloud.extractors.UniversalExtractor
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
+import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.multisrc.dooplay.DooPlay
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.annotation.Source
 import keiyoushi.utils.bodyString
-import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.useAsJsoup
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
-import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
@@ -101,28 +103,45 @@ abstract class AnimesOnlineCloud : DooPlay() {
     }
 
     // ============================ Video Links =============================
-    override fun videoListParse(response: Response): List<Video> {
-        val document = response.useAsJsoup()
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val document = client.newCall(GET(baseUrl + episode.url, headers))
+            .awaitSuccess()
+            .useAsJsoup()
         val players = document.select("ul#playeroptionsul li")
-        return players.parallelCatchingFlatMapBlocking(::getPlayerVideos)
+        return players.mapNotNull { player ->
+            val rawName = player.selectFirst("span.title")?.text().orEmpty()
+            val name = when (rawName.uppercase()) {
+                "SD" -> "360p"
+                "HD", "SD/HD", "SD / HD" -> "720p"
+                "FHD", "FULLHD", "FULLHD / HLS" -> "1080p"
+                else -> rawName
+            }
+            val payload = PlayerOptionPayload(
+                type = player.attr("data-type"),
+                post = player.attr("data-post"),
+                nume = player.attr("data-nume"),
+                label = name,
+            )
+            if (payload.post.isBlank() || payload.nume.isBlank()) return@mapNotNull null
+            Hoster(
+                hosterUrl = baseUrl + episode.url,
+                hosterName = name.ifBlank { "Player" },
+                internalData = Json.encodeToString(payload),
+            )
+        }
+    }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val payload = hoster.internalData.parseAs<PlayerOptionPayload>()
+        return getPlayerVideos(payload).sortVideos()
     }
 
     private val bloggerExtractor by lazy { BloggerExtractor(client) }
     private val universalExtractor by lazy { UniversalExtractor(client) }
 
-    private suspend fun getPlayerVideos(player: Element): List<Video> {
-        val name = player.selectFirst("span.title")!!.text()
-            .run {
-                when (this.uppercase()) {
-                    "SD" -> "360p"
-                    "HD" -> "720p"
-                    "SD/HD", "SD / HD" -> "720p"
-                    "FHD", "FULLHD", "FULLHD / HLS" -> "1080p"
-                    else -> this
-                }
-            }
-
-        val url = getPlayerUrl(player)
+    private suspend fun getPlayerVideos(payload: PlayerOptionPayload): List<Video> {
+        val name = payload.label
+        val url = getPlayerUrl(payload)
 
         val videos = when {
             "blogger.com" in url -> bloggerExtractor.videosFromUrl(url, headers)
@@ -151,16 +170,19 @@ abstract class AnimesOnlineCloud : DooPlay() {
         return videos
     }
 
-    private suspend fun getPlayerUrl(player: Element): String {
-        val type = player.attr("data-type")
-        val id = player.attr("data-post")
-        val num = player.attr("data-nume")
-        return client.newCall(GET("$baseUrl/wp-json/dooplayer/v2/$id/$type/$num"))
-            .awaitSuccess().bodyString()
-            .substringAfter("\"embed_url\":\"")
-            .substringBefore("\",")
-            .replace("\\", "")
-    }
+    private suspend fun getPlayerUrl(payload: PlayerOptionPayload): String = client.newCall(GET("$baseUrl/wp-json/dooplayer/v2/${payload.post}/${payload.type}/${payload.nume}"))
+        .awaitSuccess().bodyString()
+        .substringAfter("\"embed_url\":\"")
+        .substringBefore("\",")
+        .replace("\\", "")
+
+    @Serializable
+    data class PlayerOptionPayload(
+        val type: String,
+        val post: String,
+        val nume: String,
+        val label: String,
+    )
 
     // ============================== Filters ===============================
     @Volatile

@@ -6,9 +6,9 @@ plugins {
 
 yuzono {
     name = "BetterAnimeIo"
-    versionCode = 3
+    versionCode = 4
     contentWarning = ContentWarning.SAFE
-    libVersion = "14"
+    libVersion = "16"
     theme = "dooplay"
 
     source {

@@ -788,6 +788,122 @@ class SyncRegressionSuiteTest(unittest.TestCase):
         self.assertIn("Nox PT-BR", (local / "src/pt/prot/Prot.kt").read_text("utf-8"))
         self.assertTrue((local / "src/pt/noxonly/NoxOnly.kt").is_file())
 
+    # 18. Lib 16 downgrade floor + compatible 3-way PT-BR merge vs conflict flagging
+    def test_18_ptbr_lib16_downgrade_blocked_and_upstream_tracking(self):
+        upstream, _, local = self._init_bare_and_pair("t18")
+
+        # Seed two common PT-BR extensions originally on Lib 14 upstream: compat and conflicted
+        for slug in ("compat", "conflicted"):
+            d = upstream / f"src/pt/{slug}"
+            d.mkdir(parents=True)
+            (d / "build.gradle").write_text("ext {\n    extVersionCode = 2\n}\n", encoding="utf-8")
+            (d / f"{slug.title()}.kt").write_text(
+                f"class {slug.title()} {{\n"
+                "    fun selector() = \"div.old\"\n"
+                "    fun line2() = 1\n"
+                "    fun line3() = 2\n"
+                "    fun line4() = 3\n"
+                "    fun line5() = 4\n"
+                "    fun videoListParse() = emptyList<String>()\n"
+                "}\n",
+                encoding="utf-8",
+            )
+        _git(upstream, "add", "-A")
+        _git(upstream, "commit", "-m", "Seed Lib 14 upstream PT-BR")
+        _git(local, "fetch", "upstream", "master")
+        _git(local, "merge", "--no-edit", "-X", "ours", "upstream/master")
+
+        # Migrate both to Lib 16 locally in Nox (KTS + Hoster API)
+        for slug in ("compat", "conflicted"):
+            ld = local / f"src/pt/{slug}"
+            ld.mkdir(parents=True, exist_ok=True)
+            (ld / "build.gradle").unlink(missing_ok=True)
+            (ld / "build.gradle.kts").write_text(
+                'yuzono {\n    libVersion = "16"\n    versionCode = 5\n}\n',
+                encoding="utf-8",
+            )
+            (ld / f"{slug.title()}.kt").write_text(
+                f"class {slug.title()} {{\n"
+                "    fun selector() = \"div.old\"\n"
+                "    fun line2() = 1\n"
+                "    fun line3() = 2\n"
+                "    fun line4() = 3\n"
+                "    fun line5() = 4\n"
+                "    suspend fun getHosterList() = emptyList<String>()\n"
+                "}\n",
+                encoding="utf-8",
+            )
+        _git(local, "add", "-A")
+        _git(local, "commit", "-m", "Migrate compat & conflicted to Lib 16")
+
+        # Upstream pushes non-conflicting selector fix on compat (Lib 14) + conflicting videoListParse edit on conflicted (Lib 14)
+        (upstream / "src/pt/compat/Compat.kt").write_text(
+            "class Compat {\n"
+            "    fun selector() = \"div.new-upstream-fix\"\n"
+            "    fun line2() = 1\n"
+            "    fun line3() = 2\n"
+            "    fun line4() = 3\n"
+            "    fun line5() = 4\n"
+            "    fun videoListParse() = emptyList<String>()\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (upstream / "src/pt/compat/build.gradle").write_text("ext {\n    extVersionCode = 3\n}\n", encoding="utf-8")
+
+        (upstream / "src/pt/conflicted/Conflicted.kt").write_text(
+            "class Conflicted {\n"
+            "    fun selector() = \"div.old\"\n"
+            "    fun line2() = 1\n"
+            "    fun line3() = 2\n"
+            "    fun line4() = 3\n"
+            "    fun line5() = 4\n"
+            "    fun videoListParse() = listOf(\"v14-change\")\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        _git(upstream, "add", "-A")
+        _git(upstream, "commit", "-m", "Upstream Lib 14 fixes")
+        _git(local, "fetch", "upstream", "master")
+
+        os.chdir(local)
+        # Validate floor rejects simulated 16 -> 14 downgrade
+        floor_err = sync.validate_ptbr_lib16_floor(pre_sync_lib={"src/pt/compat": 16})
+        self.assertEqual(floor_err, [])
+        (local / "src/pt/compat/build.gradle.kts").write_text(
+            'yuzono {\n    libVersion = "14"\n    versionCode = 5\n}\n',
+            encoding="utf-8",
+        )
+        self.assertTrue(sync.validate_ptbr_lib16_floor(base_ref="HEAD"))
+        (local / "src/pt/compat/build.gradle.kts").write_text(
+            'yuzono {\n    libVersion = "16"\n    versionCode = 5\n}\n',
+            encoding="utf-8",
+        )
+
+        with patch.object(sync, "fetch_deployed_version_codes", return_value={"src/pt/compat": 5, "src/pt/conflicted": 5}), \
+             patch.object(sync, "get_publish_pending_units", return_value=([], None, False, "file", None)), \
+             patch.object(sys, "argv", ["sync-upstream.py", "--apply-no-push"]):
+            sync.main()
+
+        # Both MUST remain on Lib 16 with getHosterList and KTS preserved (NEVER downgraded to 14!)
+        self.assertEqual(sync.read_lib_version(None, "src/pt/compat"), 16)
+        self.assertEqual(sync.read_lib_version(None, "src/pt/conflicted"), 16)
+        self.assertFalse((local / "src/pt/compat/build.gradle").exists())
+        compat_kt = (local / "src/pt/compat/Compat.kt").read_text("utf-8")
+        self.assertIn("div.new-upstream-fix", compat_kt)
+        self.assertIn("getHosterList", compat_kt)
+        self.assertIn("versionCode = 6", (local / "src/pt/compat/build.gradle.kts").read_text("utf-8"))
+
+        # Conflicted must preserve getHosterList & version 5 untouched, and record NEEDS_LIB16_PORT
+        conf_kt = (local / "src/pt/conflicted/Conflicted.kt").read_text("utf-8")
+        self.assertIn("getHosterList", conf_kt)
+        self.assertNotIn("videoListParse", conf_kt)
+        self.assertIn("versionCode = 5", (local / "src/pt/conflicted/build.gradle.kts").read_text("utf-8"))
+
+        state = json.loads((local / ".github/sync-state.json").read_text("utf-8"))
+        ptbr_updates = state.get("ptbr_upstream_updates", {})
+        self.assertEqual(ptbr_updates["src/pt/compat"]["status"], "COMPATIBLE_MERGED")
+        self.assertEqual(ptbr_updates["src/pt/conflicted"]["status"], "NEEDS_LIB16_PORT")
+
 
 if __name__ == "__main__":
     unittest.main()

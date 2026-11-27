@@ -6,9 +6,9 @@ plugins {
 
 yuzono {
     name = "Pi Fansubs"
-    versionCode = 38
+    versionCode = 39
     contentWarning = ContentWarning.NSFW
-    libVersion = "14"
+    libVersion = "16"
     theme = "dooplay"
 
     source {

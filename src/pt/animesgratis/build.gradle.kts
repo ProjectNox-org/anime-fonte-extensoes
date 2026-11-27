@@ -1,12 +1,22 @@
-ext {
-    extName = 'TopAnimes'
-    extClass = '.Q1N'
-    themePkg = 'dooplay'
-    baseUrl = 'https://topanimes.net'
-    overrideVersionCode = 50
+import io.github.keiyoushi.gradle.api.ContentWarning
+
+plugins {
+    alias(kei.plugins.extension)
 }
 
-apply plugin: "kei.plugins.extension.legacy"
+yuzono {
+    name = "TopAnimes"
+    versionCode = 51
+    contentWarning = ContentWarning.SAFE
+    libVersion = "16"
+    theme = "dooplay"
+
+    source {
+        lang = "pt-BR"
+        id = 2969482460524685571L
+        baseUrl = "https://topanimes.net"
+    }
+}
 
 dependencies {
     implementation(project(":lib:bloggerextractor"))

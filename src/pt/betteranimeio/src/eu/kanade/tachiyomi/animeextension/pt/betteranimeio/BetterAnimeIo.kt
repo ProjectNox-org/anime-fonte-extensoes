@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.animeextension.pt.betteranimeio
 
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.multisrc.dooplay.DooPlay
@@ -7,11 +8,13 @@ import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.annotation.Source
 import keiyoushi.utils.bodyString
-import keiyoushi.utils.parallelCatchingFlatMapBlocking
+import keiyoushi.utils.parseAs
 import keiyoushi.utils.useAsJsoup
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
-import okhttp3.Response
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -69,40 +72,59 @@ abstract class BetterAnimeIo : DooPlay() {
     override fun genresListSelector() = "nav.genres ul.genres li a"
 
     // ============================ Video Links =============================
-    override fun videoListParse(response: Response): List<Video> {
-        val document = response.useAsJsoup()
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val document = client.newCall(GET(baseUrl + episode.url, headers))
+            .awaitSuccess()
+            .useAsJsoup()
         val players = document.select("ul#playeroptionsul li")
-        return players.parallelCatchingFlatMapBlocking(::getPlayerVideos)
+        return players.mapIndexedNotNull { index, player ->
+            val payload = PlayerOptionPayload(
+                type = player.attr("data-type"),
+                post = player.attr("data-post"),
+                nume = player.attr("data-nume"),
+            )
+            if (payload.post.isBlank() || payload.nume.isBlank()) return@mapIndexedNotNull null
+            val hosterName = player.selectFirst("span.title")?.text()?.trim()
+                ?.takeIf(String::isNotBlank) ?: "Player ${index + 1}"
+            Hoster(
+                hosterUrl = baseUrl + episode.url,
+                hosterName = hosterName,
+                internalData = Json.encodeToString(payload),
+            )
+        }
     }
 
-    private suspend fun getPlayerVideos(player: Element): List<Video> {
-        val url = getPlayerUrl(player)
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val payload = hoster.internalData.parseAs<PlayerOptionPayload>()
+        val url = getPlayerUrl(payload)
         if (url.isEmpty()) return emptyList()
 
         return when {
             "jwplayer?source=" in url || "jwplayer/?source=" in url -> {
                 val encodedSource = url.toHttpUrl().queryParameter("source") ?: return emptyList()
-                extractor.extractVideosFromApi(encodedSource)
+                extractor.extractVideosFromApi(encodedSource).sortVideos()
             }
             else -> emptyList()
         }
     }
 
-    private suspend fun getPlayerUrl(player: Element): String {
-        val type = player.attr("data-type")
-        val id = player.attr("data-post")
-        val num = player.attr("data-nume")
-        return try {
-            client.newCall(GET("$baseUrl/wp-json/dooplayer/v2/$id/$type/$num", headers))
-                .awaitSuccess()
-                .bodyString()
-                .substringAfter("\"embed_url\":\"")
-                .substringBefore("\",")
-                .replace("\\", "")
-        } catch (_: Exception) {
-            ""
-        }
+    private suspend fun getPlayerUrl(payload: PlayerOptionPayload): String = try {
+        client.newCall(GET("$baseUrl/wp-json/dooplayer/v2/${payload.post}/${payload.type}/${payload.nume}", headers))
+            .awaitSuccess()
+            .bodyString()
+            .substringAfter("\"embed_url\":\"")
+            .substringBefore("\",")
+            .replace("\\", "")
+    } catch (_: Exception) {
+        ""
     }
+
+    @Serializable
+    data class PlayerOptionPayload(
+        val type: String,
+        val post: String,
+        val nume: String,
+    )
 
     // ============================= Utilities ==============================
     override val prefQualityValues = arrayOf("360p", "720p", "1080p")

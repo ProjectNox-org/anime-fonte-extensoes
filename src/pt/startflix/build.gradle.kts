@@ -1,16 +1,23 @@
-ext {
-    extName = 'Startflix'
-    extClass = '.Startflix'
-    extVersionCode = 8
-    baseUrl = 'https://www.startflix.biz'
-    isNsfw = false
+import io.github.keiyoushi.gradle.api.ContentWarning
+
+plugins {
+    alias(kei.plugins.extension)
 }
 
-apply plugin: "kei.plugins.extension.legacy"
+yuzono {
+    name = "Startflix"
+    versionCode = 9
+    contentWarning = ContentWarning.SAFE
+    libVersion = "16"
 
-android {
-    defaultConfig {
-        manifestPlaceholders += [SOURCESCHEME: 'https', SOURCEHOST: 'www.startflix.biz']
+    source {
+        lang = "pt-BR"
+        baseUrl = "https://www.startflix.biz"
+    }
+
+    deeplink {
+        host("www.startflix.biz")
+        path("/.*")
     }
 }
 

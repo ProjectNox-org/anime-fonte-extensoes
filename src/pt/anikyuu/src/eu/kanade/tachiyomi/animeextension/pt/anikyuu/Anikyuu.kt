@@ -11,14 +11,16 @@ import eu.kanade.tachiyomi.animeextension.pt.anikyuu.extractors.StrmupExtractor
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.utils.AnimeHttpLegacySource
+import keiyoushi.annotation.Source
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.getPreferencesLazy
 import kotlinx.coroutines.async
@@ -31,12 +33,10 @@ import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 
-class Anikyuu :
-    AnimeHttpLegacySource(),
+@Source
+abstract class Anikyuu :
+    AnimeHttpSource(),
     ConfigurableAnimeSource {
-    override val name = "Anikyuu"
-    override val baseUrl = "https://j-s-an.github.io"
-    override val lang = "pt-BR"
     override val supportsLatest = true
 
     private val preferences by getPreferencesLazy()
@@ -407,19 +407,10 @@ class Anikyuu :
     }
 
     // ============================ Video Links ============================
-    override fun videoListRequest(episode: SEpisode) = GET(episode.url, headers)
-
-    override fun videoListParse(response: Response): List<Video> {
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val response = client.newCall(GET(episode.url, headers)).awaitSuccess()
         val html = response.bodyString()
-        return extractVideosFromHtml(html, response.request.url.toString())
-    }
-
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        val response = client.newCall(videoListRequest(episode)).awaitSuccess()
-        return videoListParse(response).sortVideos()
-    }
-
-    private fun extractVideosFromHtml(html: String, pageUrl: String): List<Video> = runBlocking {
+        val pageUrl = response.request.url.toString()
         val doc = Jsoup.parse(html, pageUrl)
         val playerUrls = mutableListOf<String>()
 
@@ -439,46 +430,64 @@ class Anikyuu :
             }
         }
 
-        val videos = mutableListOf<Video>()
-        for (rawUrl in playerUrls.distinct()) {
+        return playerUrls.distinct().mapNotNull { rawUrl ->
             val url = rawUrl.replace("&amp;", "&")
-            try {
-                when {
-                    url.contains("blogger.com/video.g") || url.contains("blogger.com") -> {
-                        val bloggerVideos = bloggerExtractor.videosFromUrl(url, headers)
-                        videos.addAll(bloggerVideos)
-                    }
-                    url.contains("drive.google.com") -> {
-                        val driveVideos = gdriveExtractor.videosFromUrl(url)
-                        videos.addAll(driveVideos)
-                        val fileId = Regex("/file/d/([a-zA-Z0-9_-]+)").find(url)?.groupValues?.get(1)
-                            ?: url.toHttpUrlOrNull()?.queryParameter("id")
-                        if (fileId != null) {
-                            val directUrl = "https://drive.google.com/uc?id=$fileId&export=download"
-                            videos.add(Video(directUrl, "Google Drive Direct (Download)", directUrl, headers))
-                        }
-                    }
-                    url.contains("turbovidhls.com") || url.contains("emturbovid.com") -> {
-                        videos.addAll(emTurbovidExtractor.videosFromUrl(url))
-                    }
-                    url.contains("filemoon") -> {
-                        videos.addAll(filemoonExtractor.videosFromUrl(url))
-                    }
-                    url.contains("byselapuix.com") -> {
-                        videos.addAll(byseExtractor.videosFromUrl(url))
-                    }
-                    url.contains("strmup.to") -> {
-                        videos.addAll(strmupExtractor.videosFromUrl(url))
-                    }
-                    url.endsWith(".mp4") || url.endsWith(".m3u8") -> {
-                        videos.add(Video(url, "Direct Player", url, headers))
+            val hosterName = when {
+                url.contains("blogger.com/video.g") || url.contains("blogger.com") -> "Blogger"
+                url.contains("drive.google.com") -> "Google Drive"
+                url.contains("turbovidhls.com") || url.contains("emturbovid.com") -> "EmTurbovid"
+                url.contains("filemoon") -> "Filemoon"
+                url.contains("byselapuix.com") -> "Byse"
+                url.contains("strmup.to") -> "Strmup"
+                url.endsWith(".mp4") || url.endsWith(".m3u8") -> "Direct Player"
+                else -> null
+            } ?: return@mapNotNull null
+
+            Hoster(hosterUrl = url, hosterName = hosterName)
+        }
+    }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val url = hoster.hosterUrl
+        val videos = mutableListOf<Video>()
+        try {
+            when {
+                url.contains("blogger.com/video.g") || url.contains("blogger.com") -> {
+                    videos.addAll(bloggerExtractor.videosFromUrl(url, headers))
+                }
+                url.contains("drive.google.com") -> {
+                    videos.addAll(gdriveExtractor.videosFromUrl(url))
+                    val fileId = Regex("/file/d/([a-zA-Z0-9_-]+)").find(url)?.groupValues?.get(1)
+                        ?: url.toHttpUrlOrNull()?.queryParameter("id")
+                    if (fileId != null) {
+                        val directUrl = "https://drive.google.com/uc?id=$fileId&export=download"
+                        videos.add(Video(videoUrl = directUrl, videoTitle = "Google Drive Direct (Download)", headers = headers))
                     }
                 }
-            } catch (_: Exception) {}
-        }
+                url.contains("turbovidhls.com") || url.contains("emturbovid.com") -> {
+                    videos.addAll(emTurbovidExtractor.videosFromUrl(url))
+                }
+                url.contains("filemoon") -> {
+                    videos.addAll(filemoonExtractor.videosFromUrl(url))
+                }
+                url.contains("byselapuix.com") -> {
+                    videos.addAll(byseExtractor.videosFromUrl(url))
+                }
+                url.contains("strmup.to") -> {
+                    videos.addAll(strmupExtractor.videosFromUrl(url))
+                }
+                url.endsWith(".mp4") || url.endsWith(".m3u8") -> {
+                    videos.add(Video(videoUrl = url, videoTitle = "Direct Player", headers = headers))
+                }
+            }
+        } catch (_: Exception) {}
 
-        videos.distinctBy { it.videoUrl }
+        return videos.distinctBy { it.videoUrl }.sortVideos()
     }
+
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
 
     override fun List<Video>.sortVideos(): List<Video> {
         val preferred = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)

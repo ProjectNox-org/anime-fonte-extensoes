@@ -6,9 +6,9 @@ plugins {
 
 yuzono {
     name = "SushiAnimes"
-    versionCode = 5
+    versionCode = 6
     contentWarning = ContentWarning.MIXED
-    libVersion = "14"
+    libVersion = "16"
 
     source {
         name = "Sushi Animes"

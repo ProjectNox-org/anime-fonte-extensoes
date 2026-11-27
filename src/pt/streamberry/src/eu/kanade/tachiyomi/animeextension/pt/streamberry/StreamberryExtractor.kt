@@ -126,7 +126,7 @@ class StreamberryExtractor(private val client: OkHttpClient) {
                 }
             }
             result.contains(".mpd") -> playlistUtils.extractFromDash(result, { "$name - $it" }, referer = url)
-            result.contains(".mp4") -> listOf(Video(result, "$name - MP4", result, streamHeaders))
+            result.contains(".mp4") -> listOf(Video(videoUrl = result, videoTitle = "$name - MP4", headers = streamHeaders))
             else -> emptyList()
         }
         handler.post {
@@ -209,7 +209,7 @@ class StreamberryExtractor(private val client: OkHttpClient) {
                     }
                     source.optString("mime_type").equals("video/mp4", ignoreCase = true) || sourceUrl.contains(".mp4", ignoreCase = true) -> {
                         val validation = validateMp4(sourceUrl, mediaHeaders) ?: continue
-                        if (validation.valid) add(Video(validation.finalUrl, "$name - $label", validation.finalUrl, mediaHeaders))
+                        if (validation.valid) add(Video(videoUrl = validation.finalUrl, videoTitle = "$name - $label", headers = mediaHeaders))
                     }
                 }
             }

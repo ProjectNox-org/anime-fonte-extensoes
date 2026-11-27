@@ -11,15 +11,18 @@ import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.utils.ParsedAnimeHttpLegacySource
+import keiyoushi.annotation.Source
 import keiyoushi.utils.bodyString
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
@@ -34,15 +37,10 @@ import uy.kohesive.injekt.api.get
 import java.text.SimpleDateFormat
 import java.util.Locale
 
-class Anikatsu :
-    ParsedAnimeHttpLegacySource(),
+@Source
+abstract class Anikatsu :
+    ParsedAnimeHttpSource(),
     ConfigurableAnimeSource {
-
-    override val name = "Anikatsu"
-
-    override val baseUrl = "https://anikatsu.top"
-
-    override val lang = "pt-BR"
 
     override val supportsLatest = true
 
@@ -317,52 +315,59 @@ class Anikatsu :
     override fun episodeFromElement(element: Element): SEpisode = throw UnsupportedOperationException()
 
     // ============================ Video Links =============================
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val episodeUrl = if (episode.url.startsWith("http")) episode.url else baseUrl + episode.url
         val doc = client.newCall(GET(episodeUrl, headers)).awaitSuccess().asJsoup()
 
         val playerOptions = doc.select("ul#playeroptionsul li.dooplay_player_option, li.dooplay_player_option")
-        val videoList = mutableListOf<Video>()
-
-        for (option in playerOptions) {
+        return playerOptions.mapNotNull { option ->
             val postId = option.attr("data-post")
             val nume = option.attr("data-nume")
             val type = option.attr("data-type")
             val optionTitle = option.selectFirst("span.title")?.text()?.trim().orEmpty()
+            if (postId.isBlank() || nume.isBlank() || type.isBlank()) return@mapNotNull null
 
-            if (postId.isBlank() || nume.isBlank() || type.isBlank()) continue
+            val payload = JSON.encodeToString(PlayerHosterData(postId, nume, type, optionTitle, episodeUrl))
+            Hoster(
+                hosterUrl = "$episodeUrl#$nume",
+                hosterName = optionTitle.ifBlank { "Player $nume" },
+                internalData = payload,
+            )
+        }
+    }
 
-            val formBody = FormBody.Builder()
-                .add("action", "doo_player_ajax")
-                .add("post", postId)
-                .add("nume", nume)
-                .add("type", type)
-                .build()
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val data = runCatching { JSON.decodeFromString<PlayerHosterData>(hoster.internalData) }.getOrNull()
+            ?: return emptyList()
 
-            val ajaxHeaders = headers.newBuilder()
-                .set("Referer", episodeUrl)
-                .set("X-Requested-With", "XMLHttpRequest")
-                .build()
+        val formBody = FormBody.Builder()
+            .add("action", "doo_player_ajax")
+            .add("post", data.post)
+            .add("nume", data.nume)
+            .add("type", data.type)
+            .build()
 
-            val ajaxReq = Request.Builder()
-                .url("$baseUrl/wp-admin/admin-ajax.php")
-                .post(formBody)
-                .headers(ajaxHeaders)
-                .build()
+        val ajaxHeaders = headers.newBuilder()
+            .set("Referer", data.episodeUrl)
+            .set("X-Requested-With", "XMLHttpRequest")
+            .build()
 
-            val response = runCatching { client.newCall(ajaxReq).execute() }.getOrNull() ?: continue
-            val body = response.bodyString()
-            val playerDto = runCatching { JSON.decodeFromString<DooPlayerDto>(body) }.getOrNull() ?: continue
-            val embedUrl = playerDto.embedUrl.orEmpty()
+        val ajaxReq = Request.Builder()
+            .url("$baseUrl/wp-admin/admin-ajax.php")
+            .post(formBody)
+            .headers(ajaxHeaders)
+            .build()
 
-            if (embedUrl.isBlank() || embedUrl.contains("Erro no upload", ignoreCase = true)) {
-                continue
-            }
+        val response = runCatching { client.newCall(ajaxReq).execute() }.getOrNull() ?: return emptyList()
+        val body = response.bodyString()
+        val playerDto = runCatching { JSON.decodeFromString<DooPlayerDto>(body) }.getOrNull() ?: return emptyList()
+        val embedUrl = playerDto.embedUrl.orEmpty()
 
-            videoList.addAll(extractVideosFromEmbed(embedUrl, optionTitle, episodeUrl))
+        if (embedUrl.isBlank() || embedUrl.contains("Erro no upload", ignoreCase = true)) {
+            return emptyList()
         }
 
-        return videoList
+        return extractVideosFromEmbed(embedUrl, data.title, data.episodeUrl).sortVideos()
     }
 
     private suspend fun extractVideosFromEmbed(embedUrl: String, serverName: String, episodeUrl: String): List<Video> {
@@ -380,9 +385,11 @@ class Anikatsu :
         }
     }
 
-    override fun videoListSelector(): String = throw UnsupportedOperationException()
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
 
-    override fun videoFromElement(element: Element): Video = throw UnsupportedOperationException()
+    override fun seasonListSelector(): String = throw UnsupportedOperationException()
+
+    override fun seasonFromElement(element: Element): SAnime = throw UnsupportedOperationException()
 
     override fun List<Video>.sortVideos(): List<Video> {
         val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!
@@ -563,6 +570,15 @@ class Anikatsu :
         val title: String? = null,
         val url: String? = null,
         val img: String? = null,
+    )
+
+    @Serializable
+    private data class PlayerHosterData(
+        val post: String,
+        val nume: String,
+        val type: String,
+        val title: String,
+        val episodeUrl: String,
     )
 
     @Serializable

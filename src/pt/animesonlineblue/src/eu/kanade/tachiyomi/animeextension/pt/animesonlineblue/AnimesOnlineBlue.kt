@@ -7,12 +7,14 @@ import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
-import keiyoushi.utils.AnimeHttpLegacySource
+import keiyoushi.annotation.Source
 import keiyoushi.utils.getPreferencesLazy
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -22,15 +24,10 @@ import okhttp3.Request
 import okhttp3.Response
 import uy.kohesive.injekt.injectLazy
 
-class AnimesOnlineBlue :
-    AnimeHttpLegacySource(),
+@Source
+abstract class AnimesOnlineBlue :
+    AnimeHttpSource(),
     ConfigurableAnimeSource {
-
-    override val name = "AnimesOnline Blue"
-
-    override val baseUrl = "https://animesonline.blue"
-
-    override val lang = "pt-BR"
 
     override val supportsLatest = true
 
@@ -296,29 +293,35 @@ class AnimesOnlineBlue :
 
     // ============================ Video Links =============================
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val response = client.newCall(GET("$baseUrl${episode.url}", headers)).awaitSuccess()
         val body = response.body.string()
 
         val episodeDto = runCatching { json.decodeFromString<EpisodePlayerDto>(body) }.getOrNull()
             ?: return emptyList()
 
-        val videoList = mutableListOf<Video>()
-        val playerUrl = episodeDto.playerUrl
+        val playerUrl = episodeDto.playerUrl?.takeIf { it.isNotBlank() } ?: return emptyList()
+        return listOf(
+            Hoster(
+                hosterUrl = playerUrl,
+                hosterName = "Player - ${episodeDto.tipo ?: "Padrão"}",
+            ),
+        )
+    }
 
-        if (!playerUrl.isNullOrBlank()) {
-            if (playerUrl.contains("blogger.com")) {
-                val bloggerVideos = bloggerExtractor.videosFromUrl(playerUrl, headers)
-                videoList.addAll(bloggerVideos)
-            } else {
-                videoList.add(Video(playerUrl, "Player - ${episodeDto.tipo ?: "Padrão"}", playerUrl, headers))
-            }
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val playerUrl = hoster.hosterUrl
+        val videoList = if (playerUrl.contains("blogger.com")) {
+            bloggerExtractor.videosFromUrl(playerUrl, headers)
+        } else {
+            listOf(Video(videoUrl = playerUrl, videoTitle = hoster.hosterName, headers = headers))
         }
-
         return sortVideoList(videoList)
     }
 
-    override fun videoListParse(response: Response): List<Video> = throw UnsupportedOperationException()
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
 
     // ============================== Filters ===============================
 

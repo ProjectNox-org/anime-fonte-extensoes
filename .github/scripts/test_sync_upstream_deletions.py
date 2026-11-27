@@ -138,16 +138,16 @@ class SyncDeletionTest(unittest.TestCase):
 
     def test_tomato_explicit_protection_survives_upstream_deletion(self):
         tomato_dir = ROOT / "src/pt/tomato"
-        build_file = tomato_dir / "build.gradle"
-        self.assertTrue(build_file.is_file(), "Nox Tomato source must be restored")
+        build_file = tomato_dir / "build.gradle.kts"
+        self.assertTrue(build_file.is_file(), "Nox Tomato source must exist")
         tomato_build = build_file.read_text("utf-8")
-        version_match = re.search(r"extVersionCode\s*=\s*(\d+)", tomato_build)
-        self.assertIsNotNone(version_match, "Tomato build.gradle must specify extVersionCode")
+        version_match = re.search(r"versionCode\s*=\s*(\d+)", tomato_build)
+        self.assertIsNotNone(version_match, "Tomato build.gradle.kts must specify versionCode")
         tomato_version = int(version_match.group(1))
-        self.assertGreater(tomato_version, 0, "Tomato extVersionCode must be a positive integer")
-        self.assertIn('extName = \'Tomato\'', tomato_build)
-        self.assertIn("extClass = '.Tomato'", tomato_build)
-        self.assertIn("isNsfw = false", tomato_build)
+        self.assertGreater(tomato_version, 0, "Tomato versionCode must be a positive integer")
+        self.assertIn('name = "Tomato"', tomato_build)
+        self.assertIn('libVersion = "16"', tomato_build)
+        self.assertIn("contentWarning = ContentWarning.SAFE", tomato_build)
         tomato_source = next(tomato_dir.glob("src/**/Tomato.kt")).read_text("utf-8")
         self.assertIn("https://edge.betomato.com/v2/content/search", tomato_source)
         self.assertIn("🔐 Login necessário", tomato_source)
@@ -480,7 +480,7 @@ class SyncDeletionTest(unittest.TestCase):
         target_dir = self.repo / "src/pt/darkmahou"
         if target_dir.exists():
             shutil.rmtree(target_dir)
-        shutil.copytree(real_dir, target_dir)
+        shutil.copytree(real_dir, target_dir, ignore=shutil.ignore_patterns("build"))
         (self.repo / ".github").mkdir(exist_ok=True)
         shutil.copy2(ROOT / ".github/nox-protected.txt", self.repo / ".github/nox-protected.txt")
         run("git", "add", "-A", cwd=self.repo)
@@ -502,7 +502,7 @@ class SyncDeletionTest(unittest.TestCase):
 
     def test_darkmahou_shield_against_upstream_deletion(self):
         before = self._seed_real_darkmahou()
-        self.assertIn("build.gradle", before)
+        self.assertIn("build.gradle.kts", before)
         self.assertIn(
             "src/eu/kanade/tachiyomi/animeextension/pt/darkmahou/DarkMahou.kt",
             before,
@@ -612,7 +612,8 @@ class SyncDeletionTest(unittest.TestCase):
         )
         after = self._snapshot_unit("src/pt/darkmahou")
         self.assertEqual(before, after)
-        self.assertFalse((self.repo / "src/pt/darkmahou/build.gradle.kts").exists())
+        self.assertFalse((self.repo / "src/pt/darkmahou/build.gradle").exists())
+        self.assertIn('libVersion = "16"', (self.repo / "src/pt/darkmahou/build.gradle.kts").read_text("utf-8"))
 
     def test_upstream_edit_to_unprotected_unit_is_applied_even_after_mass_bump(self):
         self.add_source("src/en/animenosub", 10)

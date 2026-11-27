@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.animeextension.pt.animeplayer
 
 import aniyomi.lib.bloggerextractor.BloggerExtractor
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
@@ -9,7 +10,6 @@ import eu.kanade.tachiyomi.network.GET
 import keiyoushi.annotation.Source
 import keiyoushi.network.get
 import keiyoushi.utils.useAsJsoup
-import kotlinx.coroutines.runBlocking
 import okhttp3.CacheControl
 import okhttp3.CookieJar
 import okhttp3.Headers
@@ -89,7 +89,7 @@ abstract class AnimePlayer : DooPlay() {
     private val playerGuardResolver by lazy { PlayerGuardResolver() }
     private val cookielessClient by lazy { client.newBuilder().cookieJar(CookieJar.NO_COOKIES).build() }
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val episodeFullUrl = KyozExtractor.absoluteUrl(baseUrl, episode.url)
         val document = runCatching {
             client.get(
@@ -105,14 +105,12 @@ abstract class AnimePlayer : DooPlay() {
             )
         }.getOrThrow()
 
-        return resolveEpisodeVideos(episodeFullUrl, document)
+        val videos = resolveEpisodeVideos(episodeFullUrl, document).sortVideos()
+        if (videos.isEmpty()) return emptyList()
+        return listOf(Hoster(hosterUrl = episodeFullUrl, hosterName = "AnimePlayer", videoList = videos))
     }
 
-    override fun videoListParse(response: Response): List<Video> {
-        val episodeFullUrl = response.request.url.toString()
-        val document = response.useAsJsoup()
-        return runBlocking { resolveEpisodeVideos(episodeFullUrl, document) }
-    }
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = hoster.videoList.orEmpty().sortVideos()
 
     private suspend fun resolveEpisodeVideos(episodeFullUrl: String, document: Document): List<Video> {
         val quality = KyozExtractor.extractQualityLabel(document)

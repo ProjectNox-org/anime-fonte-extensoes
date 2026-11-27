@@ -2,13 +2,14 @@ package eu.kanade.tachiyomi.animeextension.pt.pifansubs
 
 import aniyomi.lib.vidhideextractor.VidHideExtractor
 import eu.kanade.tachiyomi.animeextension.pt.pifansubs.extractors.BlembedExtractor
+import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.multisrc.dooplay.DooPlay
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.util.asJsoup
+import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.annotation.Source
-import kotlinx.coroutines.runBlocking
-import okhttp3.Response
+import keiyoushi.utils.useAsJsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
@@ -25,15 +26,27 @@ abstract class PiFansubs : DooPlay() {
     override fun popularAnimeSelector(): String = "div#featured-titles div.poster"
 
     // ============================ Video Links =============================
-    override fun videoListParse(response: Response): List<Video> {
-        val document = response.asJsoup()
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val document = client.newCall(GET(baseUrl + episode.url, headers))
+            .awaitSuccess()
+            .useAsJsoup()
         val players = document.select("div.source-box:not(#source-player-trailer) iframe")
-        return players.map(::getPlayerUrl).flatMap(::getPlayerVideos)
+        return players.mapIndexedNotNull { index, player ->
+            val url = getPlayerUrl(player).takeIf(String::isNotBlank) ?: return@mapIndexedNotNull null
+            val hosterName = when {
+                "vidhide" in url -> "VidHide"
+                "blembed" in url -> "Blembed"
+                else -> "Player ${index + 1}"
+            }
+            Hoster(hosterUrl = url, hosterName = hosterName)
+        }
     }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = getPlayerVideos(hoster.hosterUrl).sortVideos()
 
     private fun getPlayerUrl(player: Element): String = player.attr("data-src").ifEmpty { player.attr("src") }.let {
         when {
-            !it.startsWith("http") -> "https:" + it
+            !it.startsWith("http") -> "https:$it"
             else -> it
         }
     }
@@ -41,10 +54,10 @@ abstract class PiFansubs : DooPlay() {
     private val vidHideExtractor by lazy { VidHideExtractor(client, headers) }
     private val blembedExtractor by lazy { BlembedExtractor(client, headers) }
 
-    private fun getPlayerVideos(url: String): List<Video> = when {
-        "https://vidhide" in url -> runBlocking { vidHideExtractor.videosFromUrl(url) }
+    private suspend fun getPlayerVideos(url: String): List<Video> = when {
+        "https://vidhide" in url -> vidHideExtractor.videosFromUrl(url)
         "https://blembed" in url -> blembedExtractor.videosFromUrl(url)
-        else -> emptyList<Video>()
+        else -> emptyList()
     }
 
     // =========================== Anime Details ============================

@@ -1,14 +1,16 @@
 package eu.kanade.tachiyomi.animeextension.pt.smartanimes
 
 import eu.kanade.tachiyomi.animeextension.pt.smartanimes.extractors.SmartAnimesExtractor
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
+import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.multisrc.animestream.AnimeStream
+import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.annotation.Source
-import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.useAsJsoup
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Response
 
 @Source
 abstract class SmartAnimes : AnimeStream() {
@@ -23,20 +25,22 @@ abstract class SmartAnimes : AnimeStream() {
     override val animeDescriptionSelector = ".entry-content[itemprop=description]"
 
     // ============================ Video Links =============================
-    override fun videoListSelector() = ".dlbox li:not(.head)"
-
-    override fun videoListParse(response: Response): List<Video> {
-        val items = response.useAsJsoup().select(videoListSelector())
-
-        return items.parallelCatchingFlatMapBlocking { element ->
-            val name = element.selectFirst(".q")!!.text().trim()
-            val quality = element.selectFirst(".w")!!.text().trim()
-            val url = element.selectFirst("a")!!.attr("href")
-            getVideoList(url, "$name - $quality")
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val document = client.newCall(GET(baseUrl + episode.url, headers))
+            .awaitSuccess()
+            .useAsJsoup()
+        return document.select(".dlbox li:not(.head)").mapNotNull { element ->
+            val name = element.selectFirst(".q")?.text()?.trim().orEmpty()
+            val quality = element.selectFirst(".w")?.text()?.trim().orEmpty()
+            val url = element.selectFirst("a")?.attr("href")?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+            val hosterName = listOf(name, quality).filter { it.isNotBlank() }.joinToString(" - ")
+            Hoster(hosterUrl = url, hosterName = hosterName.ifBlank { "SmartAnimes" })
         }
     }
 
     private val smartanimesExtractor by lazy { SmartAnimesExtractor(client, headers) }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = getVideoList(hoster.hosterUrl, hoster.hosterName).sortVideos()
 
     override suspend fun getVideoList(url: String, name: String): List<Video> {
         val host = baseUrl.toHttpUrl().host

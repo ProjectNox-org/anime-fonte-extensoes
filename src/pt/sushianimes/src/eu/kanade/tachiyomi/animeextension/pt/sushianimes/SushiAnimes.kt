@@ -6,20 +6,22 @@ import aniyomi.lib.bloggerextractor.BloggerExtractor
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.annotation.Source
-import keiyoushi.utils.AnimeHttpLegacySource
 import keiyoushi.utils.addListPreference
 import keiyoushi.utils.bodyString
 import keiyoushi.utils.getPreferencesLazy
-import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.useAsJsoup
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.FormBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -33,7 +35,7 @@ import org.jsoup.select.Elements
 
 @Source
 abstract class SushiAnimes :
-    AnimeHttpLegacySource(),
+    AnimeHttpSource(),
     ConfigurableAnimeSource {
 
     override val supportsLatest = true
@@ -208,11 +210,15 @@ abstract class SushiAnimes :
         return episodes.reversed()
     }
 
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
+
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
     // ============================ Video Links =============================
     private val bloggerExtractor by lazy { BloggerExtractor(client) }
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        val response = client.newCall(videoListRequest(episode)).awaitSuccess()
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val response = client.newCall(GET(baseUrl + episode.url, headers)).awaitSuccess()
         val document = response.useAsJsoup()
 
         val embeds = document.select("[data-embed]")
@@ -222,33 +228,39 @@ abstract class SushiAnimes :
         // POST requests, sent both as the X-CSRF-TOKEN header and the _TOKEN form field.
         val csrfToken = extractCsrfToken(document)
 
-        val requestHeaders = headers.newBuilder().apply {
-            if (csrfToken.isNotBlank()) add("X-CSRF-TOKEN", csrfToken)
-        }.build()
-
-        // Each [data-embed] is a video source; fetch in parallel and ignore failures.
-        return embeds.parallelCatchingFlatMapBlocking { embed ->
-            val id = embed.attr("data-embed")
-
-            val formBody = FormBody.Builder()
-                .add("id", id)
-                .apply { if (csrfToken.isNotBlank()) add("_TOKEN", csrfToken) }
-                .build()
-
-            val request = POST("$baseUrl/ajax/embed", requestHeaders, formBody)
-            val response = client.newCall(request).execute()
-            if (!response.isSuccessful) {
-                Log.w("SushiAnimes", "Failed to fetch embed for id=$id: HTTP ${response.code}")
-                response.close()
-                return@parallelCatchingFlatMapBlocking emptyList()
-            }
-            val body = response.bodyString()
-
-            parseEmbedVideos(body)
+        return embeds.mapIndexedNotNull { index, embed ->
+            val id = embed.attr("data-embed").takeIf(String::isNotBlank) ?: return@mapIndexedNotNull null
+            val hosterName = embed.text().trim().ifBlank { "Server ${index + 1}" }
+            Hoster(
+                hosterUrl = baseUrl + episode.url,
+                hosterName = hosterName,
+                internalData = Json.encodeToString(EmbedPayload(id, csrfToken)),
+            )
         }
     }
 
-    override fun videoListParse(response: Response): List<Video> = throw UnsupportedOperationException()
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val payload = hoster.internalData.parseAs<EmbedPayload>()
+        val requestHeaders = headers.newBuilder().apply {
+            if (payload.csrfToken.isNotBlank()) add("X-CSRF-TOKEN", payload.csrfToken)
+        }.build()
+
+        val formBody = FormBody.Builder()
+            .add("id", payload.id)
+            .apply { if (payload.csrfToken.isNotBlank()) add("_TOKEN", payload.csrfToken) }
+            .build()
+
+        val request = POST("$baseUrl/ajax/embed", requestHeaders, formBody)
+        val response = client.newCall(request).awaitSuccess()
+        val body = response.bodyString()
+        return parseEmbedVideos(body).sortVideos()
+    }
+
+    @Serializable
+    data class EmbedPayload(
+        val id: String,
+        val csrfToken: String,
+    )
 
     /**
      * Parses the HTML returned by /ajax/embed. It can be:

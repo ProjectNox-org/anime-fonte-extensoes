@@ -9,20 +9,23 @@ import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.utils.ParsedAnimeHttpLegacySource
+import keiyoushi.annotation.Source
 import keiyoushi.utils.getPreferencesLazy
-import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.useAsJsoup
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import okhttp3.FormBody
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -34,15 +37,10 @@ import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
 
-class YumeFree :
-    ParsedAnimeHttpLegacySource(),
+@Source
+abstract class YumeFree :
+    ParsedAnimeHttpSource(),
     ConfigurableAnimeSource {
-
-    override val name = "YUMEFREE"
-
-    override val baseUrl = "https://yumefree.online"
-
-    override val lang = "pt-BR"
 
     override val supportsLatest = true
 
@@ -258,27 +256,38 @@ class YumeFree :
     private val vidmolyExtractor by lazy { VidMolyExtractor(client, headers) }
     private val bloggerExtractor by lazy { BloggerExtractor(client) }
 
-    override fun videoListParse(response: Response): List<Video> {
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val targetUrl = if (episode.url.startsWith("http")) episode.url else baseUrl + episode.url
+        val response = client.newCall(GET(targetUrl, headers)).awaitSuccess()
         val document = response.useAsJsoup()
         val players = document.select("ul#playeroptionsul li.dooplay_player_option")
         val episodeUrl = response.request.url.toString()
 
-        return players.parallelCatchingFlatMapBlocking { player ->
-            getPlayerVideos(player, episodeUrl)
-        }.sortVideos()
+        return players.mapNotNull { player ->
+            val playerTitle = player.selectFirst("span.title")?.text()?.trim() ?: "Player"
+            if (playerTitle.contains("Telegram", ignoreCase = true)) return@mapNotNull null
+
+            val post = player.attr("data-post")
+            val nume = player.attr("data-nume")
+            val type = player.attr("data-type")
+            val payload = Json.encodeToString(PlayerHosterData(post, nume, type, playerTitle, episodeUrl))
+            Hoster(
+                hosterUrl = "$episodeUrl#$nume",
+                hosterName = playerTitle,
+                internalData = payload,
+            )
+        }
     }
 
-    private suspend fun getPlayerVideos(player: Element, episodeUrl: String): List<Video> {
-        val playerTitle = player.selectFirst("span.title")?.text()?.trim() ?: "Player"
-        if (playerTitle.contains("Telegram", ignoreCase = true)) return emptyList()
-
-        val embedUrl = getPlayerEmbedUrl(player, episodeUrl).takeIf(String::isNotBlank)
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val data = runCatching { Json.decodeFromString<PlayerHosterData>(hoster.internalData) }.getOrNull()
             ?: return emptyList()
+        val embedUrl = getPlayerEmbedUrl(data).takeIf(String::isNotBlank) ?: return emptyList()
 
         val videos = mutableListOf<Video>()
         when {
             embedUrl.contains("vidara.to") || embedUrl.contains("morningmarkets.ink") -> {
-                videos.addAll(vidaraExtractor.videosFromUrl(embedUrl, playerTitle))
+                videos.addAll(vidaraExtractor.videosFromUrl(embedUrl, data.title))
             }
             embedUrl.contains("vidmoly") -> {
                 videos.addAll(vidmolyExtractor.videosFromUrl(embedUrl))
@@ -287,26 +296,22 @@ class YumeFree :
                 videos.addAll(bloggerExtractor.videosFromUrl(embedUrl, headers))
             }
             else -> {
-                videos.add(Video(embedUrl, playerTitle, embedUrl, headers))
+                videos.add(Video(videoUrl = embedUrl, videoTitle = data.title, headers = headers))
             }
         }
-        return videos
+        return videos.sortVideos()
     }
 
-    private suspend fun getPlayerEmbedUrl(player: Element, episodeUrl: String): String {
-        val post = player.attr("data-post")
-        val nume = player.attr("data-nume")
-        val type = player.attr("data-type")
-
+    private suspend fun getPlayerEmbedUrl(data: PlayerHosterData): String {
         val body = FormBody.Builder()
             .add("action", "doo_player_ajax")
-            .add("post", post)
-            .add("nume", nume)
-            .add("type", type)
+            .add("post", data.post)
+            .add("nume", data.nume)
+            .add("type", data.type)
             .build()
 
         val ajaxHeaders = headers.newBuilder()
-            .set("Referer", episodeUrl)
+            .set("Referer", data.episodeUrl)
             .set("Origin", baseUrl)
             .set("X-Requested-With", "XMLHttpRequest")
             .build()
@@ -317,8 +322,9 @@ class YumeFree :
         }.getOrDefault("")
     }
 
-    override fun videoListSelector(): String = throw UnsupportedOperationException()
-    override fun videoFromElement(element: Element): Video = throw UnsupportedOperationException()
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+    override fun seasonListSelector(): String = throw UnsupportedOperationException()
+    override fun seasonFromElement(element: Element): SAnime = throw UnsupportedOperationException()
 
     // ============================== Settings ==============================
 
@@ -426,6 +432,15 @@ class YumeFree :
             Pair("Nostalgia Legendado", "genre/nostalgia-legendado"),
         )
     }
+
+    @Serializable
+    data class PlayerHosterData(
+        val post: String,
+        val nume: String,
+        val type: String,
+        val title: String,
+        val episodeUrl: String,
+    )
 
     @Serializable
     data class DooPlayPlayerDto(

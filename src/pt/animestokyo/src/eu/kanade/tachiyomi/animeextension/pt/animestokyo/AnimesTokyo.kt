@@ -5,13 +5,17 @@ import aniyomi.lib.bloggerextractor.BloggerExtractor
 import aniyomi.lib.universalextractor.UniversalExtractor
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.Hoster.Companion.toHosterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.utils.AnimeHttpLegacySource
+import keiyoushi.annotation.Source
 import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.toJsonRequestBody
 import okhttp3.Headers
@@ -20,11 +24,9 @@ import okhttp3.Response
 import org.json.JSONObject
 import org.jsoup.Jsoup
 
-class AnimesTokyo : AnimeHttpLegacySource() {
+@Source
+abstract class AnimesTokyo : AnimeHttpSource() {
 
-    override val name = "Animes Tokyo"
-    override val baseUrl = "https://animes.tokyo"
-    override val lang = "pt-BR"
     override val supportsLatest = true
     override val supportsRelatedAnimes = false
 
@@ -176,7 +178,9 @@ class AnimesTokyo : AnimeHttpLegacySource() {
     private val bloggerExtractor by lazy { BloggerExtractor(client) }
     private val universalExtractor by lazy { UniversalExtractor(client) }
 
-    override fun videoListParse(response: Response): List<Video> {
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val episodeUrl = if (episode.url.startsWith("http")) episode.url else baseUrl + episode.url
+        val response = client.newCall(GET(episodeUrl, headers)).awaitSuccess()
         val doc = response.asJsoup()
         val sources = doc.select("[data-embed-id]").mapNotNull { element ->
             val encoded = element.attr("data-embed-id")
@@ -195,15 +199,21 @@ class AnimesTokyo : AnimeHttpLegacySource() {
         val slowSources = preparedSources.filter { it.type in setOf(SourceType.IFRAME, SourceType.URL) }
         val fastVideos = extractSources(fastSources, playerHeaders).distinctBy { it.videoUrl }
         if (fastVideos.isNotEmpty()) {
-            return fastVideos
+            return fastVideos.toHosterList()
         }
 
         val slowVideos = extractSources(slowSources, playerHeaders).distinctBy { it.videoUrl }
         if (slowVideos.isEmpty() && isPlaceholder(preparedSources)) {
             throw Exception("Episódio ainda não liberado. Volte em breve!")
         }
-        return slowVideos
+        return slowVideos.toHosterList()
     }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = hoster.videoList.orEmpty()
+
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
 
     private data class PlayerSource(val label: String, val payload: String?, val visibleText: String)
 
@@ -249,7 +259,11 @@ class AnimesTokyo : AnimeHttpLegacySource() {
     private fun extractSources(sources: List<PreparedSource>, playerHeaders: Headers): List<Video> = sources.parallelCatchingFlatMapBlocking { prepared ->
         val result = when (prepared.type) {
             SourceType.BLOGGER -> bloggerExtractor.videosFromUrl(prepared.embedUrl.orEmpty(), playerHeaders).map { video ->
-                Video(video.videoUrl, "${prepared.source.label} - ${video.videoTitle}", video.videoUrl, video.headers ?: Headers.headersOf())
+                Video(
+                    videoUrl = video.videoUrl,
+                    videoTitle = "${prepared.source.label} - ${video.videoTitle}",
+                    headers = video.headers ?: Headers.headersOf(),
+                )
             }
             SourceType.IFRAME,
             SourceType.URL,

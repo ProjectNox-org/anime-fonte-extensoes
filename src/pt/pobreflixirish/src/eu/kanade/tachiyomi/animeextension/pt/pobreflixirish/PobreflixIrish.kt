@@ -8,12 +8,15 @@ import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.Hoster.Companion.toHosterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.utils.ParsedAnimeHttpLegacySource
+import keiyoushi.annotation.Source
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -31,15 +34,10 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
-class PobreflixIrish :
-    ParsedAnimeHttpLegacySource(),
+@Source
+abstract class PobreflixIrish :
+    ParsedAnimeHttpSource(),
     ConfigurableAnimeSource {
-
-    override val name = "Pobreflix Irish"
-
-    override val baseUrl = "https://www.pobreflix.irish"
-
-    override val lang = "pt-BR"
 
     override val supportsLatest = true
 
@@ -400,13 +398,9 @@ class PobreflixIrish :
     }
 
     // ============================ Video Links =============================
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        val response = client.newCall(videoListRequest(episode)).execute()
-        return videoListParse(response).sortVideos()
-    }
-
-    override fun videoListParse(response: Response): List<Video> {
-        val document = response.asJsoup()
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val episodeUrl = if (episode.url.startsWith("http")) episode.url else baseUrl + episode.url
+        val document = client.newCall(GET(episodeUrl, headers)).execute().asJsoup()
         val videoList = mutableListOf<Video>()
 
         // 1. Check iframes in pframe or metaframe
@@ -444,13 +438,13 @@ class PobreflixIrish :
                         )
                     }
                 } else if (src.contains(".mp4")) {
-                    videoList.add(Video(src, PobreflixPlayerExtractor.formatVideoName("Dublado", "MP4", "Direto"), src, headers))
+                    videoList.add(Video(videoUrl = src, videoTitle = PobreflixPlayerExtractor.formatVideoName("Dublado", "MP4", "Direto"), headers = headers))
                 }
             }
         }
 
         if (videoList.isNotEmpty()) {
-            return videoList.sortVideos()
+            return videoList.sortVideos().toHosterList()
         }
 
         val failure = accumulatedFailure
@@ -459,6 +453,8 @@ class PobreflixIrish :
         }
         throw VideoResult.NoCompatibleStream.toException()
     }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = hoster.videoList.orEmpty().sortVideos()
 
     private fun prioritizeFailure(current: VideoResult?, newResult: VideoResult): VideoResult {
         if (current == null) return newResult
@@ -471,11 +467,11 @@ class PobreflixIrish :
         return current
     }
 
-    override fun videoListSelector() = throw UnsupportedOperationException("Not used")
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException("Not used")
 
-    override fun videoFromElement(element: Element) = throw UnsupportedOperationException("Not used")
+    override fun seasonListSelector(): String = throw UnsupportedOperationException("Not used")
 
-    override fun videoUrlParse(response: Response): String = throw UnsupportedOperationException("Not used")
+    override fun seasonFromElement(element: Element): SAnime = throw UnsupportedOperationException("Not used")
 
     override fun List<Video>.sortVideos(): List<Video> {
         val audio = runCatching { preferences.getString(PREF_AUDIO_KEY, PREF_AUDIO_DEFAULT) }.getOrNull() ?: PREF_AUDIO_DEFAULT

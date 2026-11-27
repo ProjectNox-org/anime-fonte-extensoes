@@ -12,14 +12,17 @@ import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.Hoster.Companion.toHosterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.network.interceptor.rateLimit
-import keiyoushi.utils.AnimeHttpLegacySource
+import keiyoushi.annotation.Source
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonRequestBody
@@ -32,15 +35,10 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.time.Duration.Companion.seconds
 
-class Tomato :
-    AnimeHttpLegacySource(),
+@Source
+abstract class Tomato :
+    AnimeHttpSource(),
     ConfigurableAnimeSource {
-
-    override val name = "Tomato"
-
-    override val baseUrl = PROD_API_URL
-
-    override val lang = "pt-BR"
 
     override val supportsLatest = true
 
@@ -452,7 +450,7 @@ class Tomato :
 
     // ============================ Video Links =============================
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val primaryId = episode.url
             .substringBefore('?')
             .removeSuffix("/stream")
@@ -470,15 +468,14 @@ class Tomato :
             val request = GET("$baseUrl/v2/anime/episode/$episodeId/stream", apiHeaders())
             val info = client.newCall(request).awaitSuccess().use { it.parseAs<EpisodeInfoDto>() }
             info.toVideos(language)
-        }.sortVideos()
+        }.sortVideos().toHosterList()
     }
 
-    override fun videoListRequest(episode: SEpisode): Request = GET("$baseUrl${episode.url}", apiHeaders())
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = hoster.videoList.orEmpty().sortVideos()
 
-    override fun videoListParse(response: Response): List<Video> {
-        val info = response.requireSuccess().parseAs<EpisodeInfoDto>()
-        return info.toVideos().sortVideos()
-    }
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
 
     private fun EpisodeInfoDto.toVideos(language: String? = null): List<Video> {
         val videoList = mutableListOf<Video>()
@@ -502,10 +499,10 @@ class Tomato :
                 if (hlsVideos.isNotEmpty()) {
                     videoList.addAll(hlsVideos)
                 } else {
-                    videoList.add(Video(streamUrl, videoLabel(language, label), streamUrl, headers = headers))
+                    videoList.add(Video(videoUrl = streamUrl, videoTitle = videoLabel(language, label), headers = headers))
                 }
             } else {
-                videoList.add(Video(streamUrl, videoLabel(language, label), streamUrl, headers = headers))
+                videoList.add(Video(videoUrl = streamUrl, videoTitle = videoLabel(language, label), headers = headers))
             }
         }
 

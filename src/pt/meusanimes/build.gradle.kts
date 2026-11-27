@@ -6,9 +6,9 @@ plugins {
 
 yuzono {
     name = "Meus Animes"
-    versionCode = 8
+    versionCode = 9
     contentWarning = ContentWarning.MIXED
-    libVersion = "14"
+    libVersion = "16"
 
     source {
         lang = "pt-BR"

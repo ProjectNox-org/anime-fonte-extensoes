@@ -6,9 +6,9 @@ plugins {
 
 yuzono {
     name = "Animes Online CC"
-    versionCode = 5
+    versionCode = 6
     contentWarning = ContentWarning.MIXED
-    libVersion = "14"
+    libVersion = "16"
     theme = "dooplay"
 
     source {

@@ -2,21 +2,22 @@ package eu.kanade.tachiyomi.animeextension.pt.darkmahou
 
 import android.util.Log
 import eu.kanade.tachiyomi.animeextension.pt.darkmahou.extractors.DarkMahouExtractor
+import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.Hoster.Companion.toHosterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.multisrc.animestream.AnimeStream
+import keiyoushi.annotation.Source
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Response
 import org.jsoup.nodes.Element
 
-class DarkMahou : AnimeStream() {
-    override val lang = "pt-BR"
-    override val name = "DarkMahou (Torrent)"
-    override val baseUrl = "https://darkmahou.io"
+@Source
+abstract class DarkMahou : AnimeStream() {
     override fun headersBuilder() = super.headersBuilder().add("Referer", baseUrl)
 
-    override val animeListUrl = "$baseUrl/animes"
+    override val animeListUrl by lazy { "$baseUrl/animes" }
 
     // =============================== Search ===============================
     override fun searchAnimeFromElement(element: Element): SAnime = SAnime.create().apply {
@@ -54,8 +55,10 @@ class DarkMahou : AnimeStream() {
 
     private val darkmahouExtractor by lazy { DarkMahouExtractor(client, headers) }
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        Log.i(name, "getVideoList -> URL => ${episode.url} || Name => ${episode.name}")
-        return darkmahouExtractor.videosFromUrl(episode.url)
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        Log.i(name, "getHosterList -> URL => ${episode.url} || Name => ${episode.name}")
+        return darkmahouExtractor.videosFromUrl(episode.url).sortVideos().toHosterList()
     }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = hoster.videoList.orEmpty().sortVideos()
 }

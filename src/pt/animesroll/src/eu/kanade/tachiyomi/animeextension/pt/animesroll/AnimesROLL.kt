@@ -9,14 +9,15 @@ import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
-import keiyoushi.utils.ParsedAnimeHttpLegacySource
+import keiyoushi.annotation.Source
 import keiyoushi.utils.getPreferencesLazy
-import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.tryParse
 import keiyoushi.utils.useAsJsoup
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -28,15 +29,10 @@ import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
 
-class AnimesROLL :
-    ParsedAnimeHttpLegacySource(),
+@Source
+abstract class AnimesROLL :
+    ParsedAnimeHttpSource(),
     ConfigurableAnimeSource {
-
-    override val name = "AnimesROLL"
-
-    override val baseUrl = "https://anroll.io"
-
-    override val lang = "pt-BR"
 
     override val supportsLatest = true
 
@@ -259,9 +255,9 @@ class AnimesROLL :
 
     // ============================ Video Links =============================
 
-    override fun videoListParse(response: Response): List<Video> {
-        val document = response.useAsJsoup()
-        val episodeUrl = response.request.url.toString()
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val episodeUrl = if (episode.url.startsWith("http")) episode.url else baseUrl + episode.url
+        val document = client.newCall(GET(episodeUrl, headers)).awaitSuccess().useAsJsoup()
         Log.d(VIDEO_DEBUG_TAG, "episode=$episodeUrl")
 
         val servers = mutableListOf<Pair<String, String>>()
@@ -295,27 +291,38 @@ class AnimesROLL :
         val distinctServers = servers.distinctBy { it.second }
         Log.d(VIDEO_DEBUG_TAG, "servers=${distinctServers.size}")
 
-        return distinctServers.parallelCatchingFlatMapBlocking { (serverName, iframeUrl) ->
-            when {
-                "anidrive" in iframeUrl -> runCatching {
-                    val videos = animesrollExtractor.videosFromUrl(iframeUrl, serverName, referer = episodeUrl)
-                    Log.d(VIDEO_DEBUG_TAG, "provider=anidrive server=$serverName videos=${videos.size}")
-                    videos
-                }.getOrElse { error ->
-                    Log.w(VIDEO_DEBUG_TAG, "provider=anidrive server=$serverName failed=${error::class.simpleName}:${error.message}")
-                    emptyList()
-                }
-                else -> {
-                    Log.d(VIDEO_DEBUG_TAG, "provider=unsupported host=${iframeUrl.substringBefore('/')}")
-                    emptyList()
-                }
+        return distinctServers.mapNotNull { (serverName, iframeUrl) ->
+            if ("anidrive" in iframeUrl) {
+                Hoster(
+                    hosterUrl = iframeUrl,
+                    hosterName = serverName.ifBlank { "AniDrive" },
+                    internalData = episodeUrl,
+                )
+            } else {
+                Log.d(VIDEO_DEBUG_TAG, "provider=unsupported host=${iframeUrl.substringBefore('/')}")
+                null
             }
-        }.also { Log.d(VIDEO_DEBUG_TAG, "videos=${it.size}") }
+        }
     }
 
-    override fun videoListSelector(): String = throw UnsupportedOperationException()
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val serverName = hoster.hosterName
+        val videos = runCatching {
+            val extracted = animesrollExtractor.videosFromUrl(hoster.hosterUrl, serverName, referer = hoster.internalData)
+            Log.d(VIDEO_DEBUG_TAG, "provider=anidrive server=$serverName videos=${extracted.size}")
+            extracted
+        }.getOrElse { error ->
+            Log.w(VIDEO_DEBUG_TAG, "provider=anidrive server=$serverName failed=${error::class.simpleName}:${error.message}")
+            emptyList()
+        }
+        return videos.sortVideos().also { Log.d(VIDEO_DEBUG_TAG, "videos=${it.size}") }
+    }
 
-    override fun videoFromElement(element: Element): Video = throw UnsupportedOperationException()
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    override fun seasonListSelector(): String = throw UnsupportedOperationException()
+
+    override fun seasonFromElement(element: Element): SAnime = throw UnsupportedOperationException()
 
     // ============================== Filters ===============================
 

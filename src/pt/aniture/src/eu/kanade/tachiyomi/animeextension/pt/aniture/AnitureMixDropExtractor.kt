@@ -39,6 +39,6 @@ internal class AnitureMixDropExtractor(private val client: OkHttpClient) {
             append("${prefix}MixDrop")
             if (lang.isNotBlank()) append("($lang)")
         }
-        return listOf(Video(videoUrl, quality, videoUrl, headers = headers, subtitleTracks = subs + externalSubs))
+        return listOf(Video(videoUrl = videoUrl, videoTitle = quality, headers = headers, subtitleTracks = subs + externalSubs))
     }
 }

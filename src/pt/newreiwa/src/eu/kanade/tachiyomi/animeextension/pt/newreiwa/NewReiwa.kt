@@ -5,23 +5,23 @@ import aniyomi.lib.googledriveepisodes.GoogleDriveEpisodes
 import aniyomi.lib.googledriveextractor.GoogleDriveExtractor
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.utils.AnimeHttpLegacySource
+import keiyoushi.annotation.Source
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.util.Locale
 
-class NewReiwa : AnimeHttpLegacySource() {
-    override val name = "New Reiwa"
-    override val baseUrl = "https://newreiwa.com"
-    override val lang = "pt-BR"
+@Source
+abstract class NewReiwa : AnimeHttpSource() {
     override val supportsLatest = true
 
     override fun popularAnimeRequest(page: Int): Request = GET("$baseUrl/kamen-rider/" + if (page > 1) "page/$page/" else "", headers)
@@ -122,22 +122,36 @@ class NewReiwa : AnimeHttpLegacySource() {
         return episodes.distinctBy { it.url }.sortedByDescending { it.episode_number }
     }
 
-    override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        val resolved = client.newCall(GET(baseUrl + episode.url, headers)).awaitSuccess().use { it.request.url.toString() }
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> = listOf(
+        Hoster(
+            hosterUrl = episode.url,
+            hosterName = "Google Drive",
+            internalData = episode.episode_number.toString(),
+        ),
+    )
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val episodeUrl = if (hoster.hosterUrl.startsWith("http")) hoster.hosterUrl else baseUrl + hoster.hosterUrl
+        val episodeNumber = hoster.internalData.toFloatOrNull() ?: 0F
+        val resolved = client.newCall(GET(episodeUrl, headers)).awaitSuccess().use { it.request.url.toString() }
         FOLDER_ID.find(resolved)?.groupValues?.get(1)?.let { folderId ->
             val file = runCatching {
                 GoogleDriveEpisodes(client, headers).getEpisodesFromFolder(folderId, "", 1, false)
-                    .minByOrNull { kotlin.math.abs(it.episode_number - episode.episode_number) }
+                    .minByOrNull { kotlin.math.abs(it.episode_number - episodeNumber) }
             }.getOrNull()
             val fileId = file?.url?.substringAfter("?id=") ?: return emptyList()
             return GoogleDriveExtractor(client, headers).videosFromUrl(fileId, videoName = "New Reiwa - Google Drive")
         }
-        val id = DRIVE_ID.find(resolved)?.value ?: DRIVE_ID.find(episode.url)?.value ?: return emptyList()
+        val id = DRIVE_ID.find(resolved)?.value ?: DRIVE_ID.find(hoster.hosterUrl)?.value ?: return emptyList()
         return GoogleDriveExtractor(client, headers).videosFromUrl(
             id,
             videoName = "New Reiwa - Google Drive",
         )
     }
+
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
 
     private fun parseDirectory(document: Document): List<SAnime> = document.select("article.single-page-article > .entry a[href]")
         .mapNotNull { link ->

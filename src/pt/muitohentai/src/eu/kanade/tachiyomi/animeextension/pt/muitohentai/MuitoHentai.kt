@@ -1,20 +1,22 @@
 package eu.kanade.tachiyomi.animeextension.pt.muitohentai
 
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.ParsedAnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
-import keiyoushi.utils.ParsedAnimeHttpLegacySource
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 
 @Source
-abstract class MuitoHentai : ParsedAnimeHttpLegacySource() {
+abstract class MuitoHentai : ParsedAnimeHttpSource() {
 
     override val supportsLatest = true
 
@@ -89,22 +91,40 @@ abstract class MuitoHentai : ParsedAnimeHttpLegacySource() {
     }
 
     // ============================ Video Links =============================
-    override fun videoListSelector() = "div.playex > div#option-0 > iframe"
+    private fun videoListSelector() = "div.playex > div#option-0 > iframe"
 
-    override fun videoListParse(response: Response): List<Video> {
-        val doc = response.asJsoup()
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val doc = client.newCall(GET(baseUrl + episode.url, headers))
+            .awaitSuccess()
+            .asJsoup()
         val idplay = doc.selectFirst(videoListSelector())!!.attr("src").substringAfter("?idplay=")
-        val res = client.newCall(GET("https://www.hentaitube.online/players_sites/mt/index.php?idplay=$idplay")).execute()
-        val pdoc = res.asJsoup()
+        return listOf(
+            Hoster(
+                hosterUrl = "https://www.hentaitube.online/players_sites/mt/index.php?idplay=$idplay",
+                hosterName = "MuitoHentai",
+            ),
+        )
+    }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val pdoc = client.newCall(GET(hoster.hosterUrl, headers))
+            .awaitSuccess()
+            .asJsoup()
         return pdoc
             .select("source")
             .map(::videoFromElement)
     }
 
-    override fun videoFromElement(element: Element): Video {
+    private fun videoFromElement(element: Element): Video {
         val url = element.attr("src")
         return Video(videoUrl = url, videoTitle = element.attr("label"))
     }
+
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    override fun seasonListSelector(): String = throw UnsupportedOperationException()
+
+    override fun seasonFromElement(element: Element): SAnime = throw UnsupportedOperationException()
 
     // ============================= Utilities ==============================
     private fun String.parseDate(): Long = runCatching { DATE_FORMATTER.parse(this)?.time }

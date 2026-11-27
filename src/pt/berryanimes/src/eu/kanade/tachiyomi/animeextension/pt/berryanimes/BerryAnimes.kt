@@ -7,17 +7,19 @@ import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.Hoster.Companion.toHosterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.utils.AnimeHttpLegacySource
+import keiyoushi.annotation.Source
 import keiyoushi.utils.extractNextJs
 import keiyoushi.utils.parseAs
-import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -25,12 +27,10 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Response
 import org.jsoup.nodes.Document
 
-class BerryAnimes :
-    AnimeHttpLegacySource(),
+@Source
+abstract class BerryAnimes :
+    AnimeHttpSource(),
     ConfigurableAnimeSource {
-    override val name = "Berry Animes"
-    override val baseUrl = "https://berryanimes.com"
-    override val lang = "pt-BR"
 
     // Home rails are editorial recommendations, not a chronological update feed.
     override val supportsLatest = false
@@ -220,11 +220,17 @@ class BerryAnimes :
         }
     }
 
-    override fun videoListRequest(episode: SEpisode): okhttp3.Request {
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val path = absolute(episode.url).toHttpUrl().encodedPath.substringAfter("/watch/")
-        return GET("$baseUrl/api/watch/$path", headers)
+        val response = client.newCall(GET("$baseUrl/api/watch/$path", headers)).awaitSuccess()
+        return resolveVideos(response).toHosterList()
     }
-    override fun videoListParse(response: Response): List<Video> = runBlocking { resolveVideos(response) }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = hoster.videoList.orEmpty()
+
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
 
     private suspend fun resolveVideos(response: Response): List<Video> = response.use {
         if (it.request.url.host == "sso.berryanimes.com" || it.code == 401) {
@@ -247,7 +253,7 @@ class BerryAnimes :
             for (embed in embeds) {
                 try {
                     videos += extractor.videosFromUrl(embed.toString(), bloggerHeaders).filter { video ->
-                        val url = video.videoUrl?.toHttpUrlOrNull()
+                        val url = video.videoUrl.toHttpUrlOrNull()
                         url != null && url.host.endsWith(".googlevideo.com") && url.encodedPath == "/videoplayback" &&
                             (
                                 url.queryParameter("itag") in listOf("18", "22", "37", "59", "78") ||
@@ -283,11 +289,25 @@ class BerryAnimes :
         ).flatMap { video ->
             val audio = video.audioTracks.filter { it.lang in listOf("pt-BR", "ja-JP") }
             if (audio.isEmpty()) {
-                listOf(Video(video.videoUrl, "Berry - ${video.videoTitle}", video.videoUrl, playbackHeaders, video.subtitleTracks, video.audioTracks))
+                listOf(
+                    Video(
+                        videoUrl = video.videoUrl,
+                        videoTitle = "Berry - ${video.videoTitle}",
+                        headers = playbackHeaders,
+                        subtitleTracks = video.subtitleTracks,
+                        audioTracks = video.audioTracks,
+                    ),
+                )
             } else {
                 audio.map { track ->
                     val language = if (track.lang == "pt-BR") "Dublado" else "Legendado"
-                    Video(video.videoUrl, "Berry - $language - ${video.videoTitle}", video.videoUrl, playbackHeaders, video.subtitleTracks, listOf(track))
+                    Video(
+                        videoUrl = video.videoUrl,
+                        videoTitle = "Berry - $language - ${video.videoTitle}",
+                        headers = playbackHeaders,
+                        subtitleTracks = video.subtitleTracks,
+                        audioTracks = listOf(track),
+                    )
                 }
             }
         }.sortVideos()
@@ -295,7 +315,6 @@ class BerryAnimes :
 
     override fun List<Video>.sortVideos() = sortedByDescending { Regex("(\\d{3,4})p").find(it.videoTitle)?.groupValues?.get(1)?.toIntOrNull() ?: 0 }
 
-    override fun videoUrlParse(response: Response): String = error("Use videoListParse")
     override fun setupPreferenceScreen(screen: PreferenceScreen) = account.addPreferences(screen)
     override fun getFilterList() = AnimeFilterList(TypeFilter())
 

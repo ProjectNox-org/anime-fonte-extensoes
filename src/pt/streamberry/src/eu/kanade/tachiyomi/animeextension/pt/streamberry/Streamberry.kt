@@ -4,20 +4,22 @@ import aniyomi.lib.playlistutils.PlaylistUtils
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 import eu.kanade.tachiyomi.animesource.model.AnimesPage
+import eu.kanade.tachiyomi.animesource.model.Hoster
+import eu.kanade.tachiyomi.animesource.model.Hoster.Companion.toHosterList
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
+import eu.kanade.tachiyomi.animesource.online.AnimeHttpSource
 import eu.kanade.tachiyomi.network.GET
-import keiyoushi.utils.AnimeHttpLegacySource
+import eu.kanade.tachiyomi.network.awaitSuccess
+import keiyoushi.annotation.Source
 import keiyoushi.utils.firstInstanceOrNull
 import okhttp3.Request
 import okhttp3.Response
 import java.net.URLEncoder
 
-open class Streamberry : AnimeHttpLegacySource() {
-    override val name = "Streamberry"
-    override val baseUrl = "https://streamberry.com.br"
-    override val lang = "pt-BR"
+@Source
+abstract class Streamberry : AnimeHttpSource() {
     override val supportsLatest = true
 
     private val extractor by lazy { StreamberryExtractor(client) }
@@ -150,9 +152,9 @@ open class Streamberry : AnimeHttpLegacySource() {
 
     // ============================ Video List ==============================
 
-    override fun videoListRequest(episode: SEpisode): Request {
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
         val path = episode.url.removePrefix("/")
-        return when {
+        val request = when {
             path.startsWith("filmes/") -> {
                 val slug = path.substringAfter("filmes/").removeSuffix("/")
                 GET("$baseUrl/api/v1/movies/$slug", headers)
@@ -167,45 +169,51 @@ open class Streamberry : AnimeHttpLegacySource() {
             }
             else -> GET("$baseUrl/api/v1/movies/$path", headers)
         }
-    }
-
-    override fun videoListParse(response: Response): List<Video> {
-        val url = response.request.url.encodedPath
-        val body = response.body.string()
-        val players: List<StreamberryHelper.PlayerDto> = when {
-            url.contains("/movies/") -> StreamberryHelper.json.decodeFromString<StreamberryHelper.MovieDetailDto>(body).players.orEmpty()
-            url.contains("/episode-by-slug/") -> StreamberryHelper.json.decodeFromString<StreamberryHelper.EpisodeDetailDto>(body).players.orEmpty()
-            url.contains("/series/") -> {
-                val series = StreamberryHelper.json.decodeFromString<StreamberryHelper.SeriesDetailDto>(body)
-                series.seasons.orEmpty().firstOrNull()?.episodes.orEmpty().firstOrNull()?.players.orEmpty()
+        val response = client.newCall(request).awaitSuccess()
+        return response.use {
+            val url = it.request.url.encodedPath
+            val body = it.body.string()
+            val players: List<StreamberryHelper.PlayerDto> = when {
+                url.contains("/movies/") -> StreamberryHelper.json.decodeFromString<StreamberryHelper.MovieDetailDto>(body).players.orEmpty()
+                url.contains("/episode-by-slug/") -> StreamberryHelper.json.decodeFromString<StreamberryHelper.EpisodeDetailDto>(body).players.orEmpty()
+                url.contains("/series/") -> {
+                    val series = StreamberryHelper.json.decodeFromString<StreamberryHelper.SeriesDetailDto>(body)
+                    series.seasons.orEmpty().firstOrNull()?.episodes.orEmpty().firstOrNull()?.players.orEmpty()
+                }
+                else -> emptyList()
             }
-            else -> emptyList()
-        }
 
-        val activePlayers = players.filter { it.isActive && !it.embedUrl.isNullOrBlank() }
-        if (activePlayers.isEmpty()) return emptyList()
+            val activePlayers = players.filter { p -> p.isActive && !p.embedUrl.isNullOrBlank() }
+            if (activePlayers.isEmpty()) return@use emptyList()
 
-        val grouped = activePlayers.groupBy { it.audioType?.trim()?.uppercase() ?: "PRINCIPAL" }
-        val videoList = mutableListOf<Video>()
+            val grouped = activePlayers.groupBy { p -> p.audioType?.trim()?.uppercase() ?: "PRINCIPAL" }
+            val videoList = mutableListOf<Video>()
 
-        for ((audioType, playerList) in grouped) {
-            val sorted = playerList.sortedBy { StreamberryHelper.serverPriority(it.serverName.orEmpty()) }
-            for (player in sorted) {
-                val embedUrl = player.embedUrl ?: continue
-                val serverName = player.serverName?.trim().orEmpty().ifBlank { "Servidor" }
-                val label = "$serverName - $audioType"
-                val videos = runCatching {
-                    extractor.videosFromUrl(embedUrl, label, baseUrl, playlistUtils)
-                }.getOrDefault(emptyList())
+            for ((audioType, playerList) in grouped) {
+                val sorted = playerList.sortedBy { p -> StreamberryHelper.serverPriority(p.serverName.orEmpty()) }
+                for (player in sorted) {
+                    val embedUrl = player.embedUrl ?: continue
+                    val serverName = player.serverName?.trim().orEmpty().ifBlank { "Servidor" }
+                    val label = "$serverName - $audioType"
+                    val videos = runCatching {
+                        extractor.videosFromUrl(embedUrl, label, baseUrl, playlistUtils)
+                    }.getOrDefault(emptyList())
 
-                if (videos.isNotEmpty()) {
-                    videoList.addAll(videos)
-                    break
+                    if (videos.isNotEmpty()) {
+                        videoList.addAll(videos)
+                        break
+                    }
                 }
             }
+            videoList.toHosterList()
         }
-        return videoList
     }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = hoster.videoList.orEmpty()
+
+    override fun hosterListParse(response: Response): List<Hoster> = throw UnsupportedOperationException()
+
+    override fun seasonListParse(response: Response): List<SAnime> = throw UnsupportedOperationException()
 
     // ============================= Filters ================================
 

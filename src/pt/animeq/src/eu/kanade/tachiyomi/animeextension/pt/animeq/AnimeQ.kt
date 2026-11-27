@@ -4,19 +4,19 @@ import aniyomi.lib.bloggerextractor.BloggerExtractor
 import eu.kanade.tachiyomi.animeextension.pt.animeq.extractors.UniversalExtractor
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.multisrc.dooplay.DooPlay
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.annotation.Source
-import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.useAsJsoup
 import kotlinx.serialization.Serializable
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
-import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
@@ -108,18 +108,30 @@ abstract class AnimeQ : DooPlay() {
     }
 
     // ============================ Video Links =============================
-    override fun videoListParse(response: Response): List<Video> {
-        val document = response.useAsJsoup()
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val document = client.newCall(GET(baseUrl + episode.url, headers))
+            .awaitSuccess()
+            .useAsJsoup()
         val players = document.select("div.animeq-player__source[data-animeq-source]")
-        return players.parallelCatchingFlatMapBlocking(::getPlayerVideos)
+        return players.mapNotNull { player ->
+            val url = getPlayerUrl(player)
+            if (url.isEmpty() || !url.startsWith("http")) return@mapNotNull null
+            val name = normalizePlayerName(player)
+            Hoster(hosterUrl = url, hosterName = name, internalData = name)
+        }
+    }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val name = hoster.internalData.ifBlank { hoster.hosterName }
+        return getPlayerVideos(hoster.hosterUrl, name).sortVideos()
     }
 
     private val bloggerExtractor by lazy { BloggerExtractor(client) }
     private val universalExtractor by lazy { UniversalExtractor(client) }
 
-    private suspend fun getPlayerVideos(player: Element): List<Video> {
+    private fun normalizePlayerName(player: Element): String {
         val sourceIndex = player.attr("data-animeq-source")
-        val name = (
+        return (
             player.selectFirst("iframe[title]")?.attr("title")
                 ?: player.closest("section.animeq-player")
                     ?.selectFirst("button[data-animeq-switch=$sourceIndex]")
@@ -134,10 +146,9 @@ abstract class AnimeQ : DooPlay() {
                     else -> this
                 }
             } ?: "Player"
+    }
 
-        val url = getPlayerUrl(player)
-        if (url.isEmpty() || !url.startsWith("http")) return emptyList()
-
+    private suspend fun getPlayerVideos(url: String, name: String): List<Video> {
         val videos = when {
             "blogger.com" in url -> bloggerExtractor.videosFromUrl(url, headers)
             "jwplayer?source=" in url -> {

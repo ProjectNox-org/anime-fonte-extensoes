@@ -3,14 +3,15 @@ package eu.kanade.tachiyomi.animeextension.pt.animesonlinecc
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import aniyomi.lib.bloggerextractor.BloggerExtractor
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
+import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.multisrc.dooplay.DooPlay
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.awaitSuccess
 import keiyoushi.annotation.Source
-import keiyoushi.utils.parallelCatchingFlatMapBlocking
 import keiyoushi.utils.useAsJsoup
-import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
@@ -53,34 +54,43 @@ abstract class AnimesOnlineCC : DooPlay() {
     }
 
     // ============================ Video Links =============================
-    override fun videoListParse(response: Response): List<Video> {
-        val document = response.useAsJsoup()
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        val document = client.newCall(GET(baseUrl + episode.url, headers))
+            .awaitSuccess()
+            .useAsJsoup()
         val players = document.select("#playex iframe")
-        return players.parallelCatchingFlatMapBlocking(::getPlayerVideos)
+        return players.mapNotNull { player ->
+            val url = player.attr("src").takeIf(String::isNotBlank) ?: return@mapNotNull null
+            val id = player.parent()?.attr("id").orEmpty()
+            val language =
+                player.ownerDocument()!!
+                    .selectFirst("a.options[href=\"#$id\"]")
+                    ?.text()
+                    ?.trim().takeIf {
+                        it?.lowercase() == "legendado" || it?.lowercase() == "dublado"
+                    } ?: ""
+            Hoster(
+                hosterUrl = url,
+                hosterName = language.ifBlank { "Blogger" },
+                internalData = language,
+            )
+        }
+    }
+
+    override suspend fun getVideoList(hoster: Hoster): List<Video> = when {
+        "blogger.com" in hoster.hosterUrl -> bloggerExtractor.videosFromUrl(hoster.hosterUrl, headers, hoster.internalData)
+        else -> emptyList()
+    }.sortVideos()
+
+    override fun List<Hoster>.sortHosters(): List<Hoster> {
+        val language = preferences.getString(PREF_LANGUAGE_KEY, PREF_LANGUAGE_DEFAULT)!!
+        return sortedByDescending { it.hosterName.contains(language, ignoreCase = true) }
     }
 
     override val prefQualityValues = arrayOf("360p", "720p")
     override val prefQualityEntries = prefQualityValues
 
     private val bloggerExtractor by lazy { BloggerExtractor(client) }
-
-    private suspend fun getPlayerVideos(player: Element): List<Video> {
-        val url = player.attr("src")
-
-        val id = player.parent()!!.attr("id")
-        val language =
-            player.ownerDocument()!!
-                .selectFirst("a.options[href=\"#$id\"]")
-                ?.text()
-                ?.trim().takeIf {
-                    it?.lowercase() == "legendado" || it?.lowercase() == "dublado"
-                } ?: ""
-
-        return when {
-            "blogger.com" in url -> bloggerExtractor.videosFromUrl(url, headers, language)
-            else -> emptyList()
-        }
-    }
 
     // ============================== Filters ===============================
     override fun genresListRequest() = GET("$baseUrl/generos/", headers)

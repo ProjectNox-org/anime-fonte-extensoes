@@ -117,7 +117,7 @@ class PobreflixPlayerExtractor(private val client: OkHttpClient) {
                 .set("Referer", fullUrl)
                 .set("Origin", "https://${fullUrl.toHttpUrl().host}")
                 .build()
-            return VideoResult.Success(listOf(Video(fullUrl, formatVideoName("Dublado", "MP4", label), fullUrl, videoHeaders)))
+            return VideoResult.Success(listOf(Video(videoUrl = fullUrl, videoTitle = formatVideoName("Dublado", "MP4", label), headers = videoHeaders)))
         }
 
         if (fullUrl.contains("vaiquecol.com", ignoreCase = true)) {
@@ -129,7 +129,7 @@ class PobreflixPlayerExtractor(private val client: OkHttpClient) {
         val videos = runCatching {
             universalExtractor.videosFromUrl(fullUrl, headers, prefix = label).map { v ->
                 val q = extractQuality(v.videoTitle)
-                Video(v.videoUrl, formatVideoName("Dublado", q, label), v.videoUrl, v.headers)
+                Video(videoUrl = v.videoUrl, videoTitle = formatVideoName("Dublado", q, label), headers = v.headers)
             }
         }.getOrDefault(emptyList())
 
@@ -348,7 +348,7 @@ class PobreflixPlayerExtractor(private val client: OkHttpClient) {
                 val videos = runCatching {
                     universalExtractor.videosFromUrl(target.videoUrl, headers, prefix = target.host).map { v ->
                         val q = extractQuality(v.videoTitle)
-                        Video(v.videoUrl, formatVideoName(target.opt.lang, q, target.host), v.videoUrl, v.headers)
+                        Video(videoUrl = v.videoUrl, videoTitle = formatVideoName(target.opt.lang, q, target.host), headers = v.headers)
                     }
                 }.getOrDefault(emptyList())
 
@@ -437,7 +437,7 @@ class PobreflixPlayerExtractor(private val client: OkHttpClient) {
                     .set("Referer", videoUrl)
                     .set("Origin", "https://${videoUrl.toHttpUrl().host}")
                     .build()
-                listOf(Video(videoUrl, formatVideoName(opt.lang, "MP4", host), videoUrl, vHeaders))
+                listOf(Video(videoUrl = videoUrl, videoTitle = formatVideoName(opt.lang, "MP4", host), headers = vHeaders))
             }
 
             else -> emptyList()

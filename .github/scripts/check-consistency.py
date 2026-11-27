@@ -477,6 +477,8 @@ def check_consistency(
         protected = get_protected_units()
         pending_units = []
 
+    pending_set = set(pending_units)
+
     parity_by_status = {
         "IN_SYNC": [],
         "MISSING": [],
@@ -487,6 +489,7 @@ def check_consistency(
         "PROTECTED_PTBR": [],
         "EXCEPTION": [],
     }
+    version_drift_units: list[tuple[str, int, int]] = []
 
     all_audited_units = sorted(upstream_sources | local_modules | set(deployed_by_unit.keys()))
     base = sync_mod.git("merge-base", "HEAD", upstream_ref).strip() if sync_mod else ""
@@ -555,6 +558,8 @@ def check_consistency(
                 deployed_code = dep.get("code", 0)
                 if local_eff_code > deployed_code:
                     return True
+                if deployed_code > 0 and local_eff_code < deployed_code:
+                    version_drift_units.append((unit, local_eff_code, deployed_code))
         # Check APK artifact existence:
         apk_name = dep.get("apk")
         if not apk_name:
@@ -591,11 +596,16 @@ def check_consistency(
         return False
 
     for u in all_audited_units:
+        is_ptbr_protected = bool(
+            sync_mod.is_ptbr_unit_protected(u, upstream_ref, base=base)
+            if (sync_mod and hasattr(sync_mod, "is_ptbr_unit_protected"))
+            else (u.startswith("src/pt/") or (sync_mod and sync_mod.is_ptbr_unit(u)))
+        )
         if u in audit_exceptions:
             parity_by_status["EXCEPTION"].append(u)
         elif u in renamed_units:
             parity_by_status["RENAMED"].append(u)
-        elif u.startswith("src/pt/") or (sync_mod and sync_mod.is_ptbr_unit(u)):
+        elif is_ptbr_protected:
             if u in local_modules and is_publish_pending(u):
                 parity_by_status["PUBLISH_PENDING"].append(u)
             else:
@@ -610,12 +620,30 @@ def check_consistency(
                     parity_by_status["PROTECTED_PTBR"].append(u)
             else:
                 parity_by_status["STALE"].append(u)
-        elif u in unmerged_units:
+        elif u in unmerged_units or u in pending_set:
             parity_by_status["OUTDATED"].append(u)
         elif u in local_modules and is_publish_pending(u):
             parity_by_status["PUBLISH_PENDING"].append(u)
         else:
             parity_by_status["IN_SYNC"].append(u)
+
+    current_code_sha = sync_mod.get_code_sha("HEAD") if (sync_mod and hasattr(sync_mod, "get_code_sha")) else main_head
+    cand_blocked_active = bool(
+        blocked_candidate
+        and blocked_candidate.get("code_sha") == current_code_sha
+        and blocked_candidate.get("upstream_sha") == upstream_head
+        and upstream_head != "UNKNOWN"
+    )
+    pub_blocked_active = bool(
+        publication_block
+        and publication_block.get("code_sha") == current_code_sha
+        and publication_block.get("failure_type") == "DETERMINISTIC_BUILD_FAILURE"
+    )
+    guard_status = (
+        f"BLOCKED ({blocked_candidate.get('failure_type', 'BLOCKED_DETERMINISTIC')})"
+        if cand_blocked_active
+        else ("BLOCKED (DETERMINISTIC_BUILD_FAILURE)" if pub_blocked_active else sync_status)
+    )
 
     # Build Markdown summary
     lines = [
@@ -626,6 +654,7 @@ def check_consistency(
         f"| **Sync Branch HEAD** | `{sync_head[:8] if len(sync_head)>=8 else sync_head}` | {'MATCH' if sync_head == upstream_head else 'DIVERGED'} |",
         f"| **Recorded Synced SHA** | `{synced_state_sha[:8] if len(synced_state_sha)>=8 else synced_state_sha}` | {'MATCH' if synced_state_sha == upstream_head else 'PENDING'} |",
         f"| **Main Branch HEAD** | `{main_head[:8] if len(main_head)>=8 else main_head}` | Current |",
+        f"| **Sync Guard State** | `{guard_status}` | {'WARNING' if (cand_blocked_active or pub_blocked_active) else 'OK'} |",
         f"| **Local Source Extensions** | {len(local_modules)} modules | Active |",
         f"| **Deployed Catalog Extensions** | {len(deployed_items)} extensions | Distribution |",
         f"| **Catalog Verification Source** | {catalog_source} | {catalog_status} |",
@@ -636,11 +665,11 @@ def check_consistency(
         "| :--- | :--- | :--- |",
         f"| `IN_SYNC` | {len(parity_by_status['IN_SYNC'])} | Faithful 1-by-1 match with Yuzono & deployed in catalog |",
         f"| `MISSING` | {len(parity_by_status['MISSING'])} | Present in Yuzono, missing locally in Nox |",
-        f"| `OUTDATED` | {len(parity_by_status['OUTDATED'])} | Foreign extensions with divergent code or pending bump |",
+        f"| `OUTDATED` | {len(parity_by_status['OUTDATED'])} | Foreign or uncustomized extensions with divergent code or pending bump |",
         f"| `STALE` | {len(parity_by_status['STALE'])} | Removed in Yuzono, pending pruning from Nox |",
         f"| `RENAMED` | {len(parity_by_status['RENAMED'])} | Transitioned/renamed upstream extensions |",
         f"| `PUBLISH_PENDING` | {len(parity_by_status['PUBLISH_PENDING'])} | Code in sync locally, catalog publish pending |",
-        f"| `PROTECTED_PTBR` | {len(parity_by_status['PROTECTED_PTBR'])} | Untouchable Brazilian extensions |",
+        f"| `PROTECTED_PTBR` | {len(parity_by_status['PROTECTED_PTBR'])} | Customized/locked Brazilian extensions |",
         f"| `EXCEPTION` | {len(parity_by_status['EXCEPTION'])} | Documented audit exceptions |",
         "",
     ]
@@ -652,11 +681,16 @@ def check_consistency(
     if parity_by_status["OUTDATED"]:
         sample = parity_by_status["OUTDATED"][:20]
         extra = f" and {len(parity_by_status['OUTDATED']) - 20} more..." if len(parity_by_status["OUTDATED"]) > 20 else ""
-        lines.append(f"**Outdated Foreign Units to Update ({len(parity_by_status['OUTDATED'])}):** `{', '.join(sample)}`{extra}\n")
+        lines.append(f"**Outdated Units to Update ({len(parity_by_status['OUTDATED'])}):** `{', '.join(sample)}`{extra}\n")
     if parity_by_status["PUBLISH_PENDING"]:
         sample = parity_by_status["PUBLISH_PENDING"][:20]
         extra = f" and {len(parity_by_status['PUBLISH_PENDING']) - 20} more..." if len(parity_by_status["PUBLISH_PENDING"]) > 20 else ""
         lines.append(f"**Pending Publication Units ({len(parity_by_status['PUBLISH_PENDING'])}):** `{', '.join(sample)}`{extra}\n")
+
+    if version_drift_units:
+        drift_desc = ", ".join(f"{u} (local={lc} < catalog={dc})" for u, lc, dc in version_drift_units[:20])
+        lines.append(f"**Version Drift Warnings ({len(version_drift_units)}):** `{drift_desc}`\n")
+        print(f"::warning::VERSION_DRIFT detected: {drift_desc}")
 
     report = "\n".join(lines)
     print(report)
@@ -670,19 +704,6 @@ def check_consistency(
             pass
 
     if check_pending:
-        current_code_sha = sync_mod.get_code_sha("HEAD") if (sync_mod and hasattr(sync_mod, "get_code_sha")) else main_head
-        cand_blocked_active = bool(
-            blocked_candidate
-            and blocked_candidate.get("code_sha") == current_code_sha
-            and blocked_candidate.get("upstream_sha") == upstream_head
-            and upstream_head != "UNKNOWN"
-        )
-        pub_blocked_active = bool(
-            publication_block
-            and publication_block.get("code_sha") == current_code_sha
-            and publication_block.get("failure_type") == "DETERMINISTIC_BUILD_FAILURE"
-        )
-
         # Upstream divergence or pending source changes independently prove sync is needed
         has_upstream_work = bool(
             pending_units
@@ -697,7 +718,7 @@ def check_consistency(
 
         if cand_blocked_active and (not parity_by_status["PUBLISH_PENDING"] or pub_blocked_active):
             print(
-                f"Notice: Candidate {upstream_head[:8]} on code {current_code_sha[:8]} is deterministically blocked "
+                f"::warning::Candidate {upstream_head[:8]} on code {current_code_sha[:8]} is deterministically blocked "
                 f"({blocked_candidate.get('failure_type')}: {blocked_candidate.get('cause')}). "
                 "Standing by until main code or upstream advances."
             )
@@ -713,7 +734,7 @@ def check_consistency(
         if parity_by_status["PUBLISH_PENDING"]:
             if pub_blocked_active:
                 print(
-                    f"Notice: Publication recovery for code {current_code_sha[:8]} is deterministically suspended "
+                    f"::warning::Publication recovery for code {current_code_sha[:8]} is deterministically suspended "
                     f"({publication_block.get('cause')}). Standing by until code changes."
                 )
                 return 0

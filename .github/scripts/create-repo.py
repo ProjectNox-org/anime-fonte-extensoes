@@ -14,9 +14,57 @@ PACKAGE_NAME_REGEX = re.compile(r"package: name='([^']+)'")
 VERSION_CODE_REGEX = re.compile(r"versionCode='([^']+)'")
 VERSION_NAME_REGEX = re.compile(r"versionName='([^']+)'")
 IS_NSFW_REGEX = re.compile(r"'tachiyomi.animeextension.nsfw' value='([^']+)'")
-APPLICATION_LABEL_REGEX = re.compile(r"^application-label:'([^']+)'", re.MULTILINE)
+CONTENT_WARNING_REGEX = re.compile(r"'aniyomix\.contentWarning' value='([^']+)'")
+APPLICATION_LABEL_REGEX = re.compile(r"^application-label:'(.*)'$", re.MULTILINE)
+ANIYOMIX_NAME_REGEX = re.compile(r"meta-data: name='aniyomix\.name' value='(.*)'$", re.MULTILINE)
 APPLICATION_ICON_320_REGEX = re.compile(r"^application-icon-320:'([^']+)'", re.MULTILINE)
 LANGUAGE_REGEX = re.compile(r"aniyomi-([^.]+)")
+
+CONTENT_WARNING_FROM_PROTO = {
+    1: "SAFE",
+    2: "MIXED",
+    3: "NSFW",
+}
+CONTENT_WARNING_FROM_MANIFEST = {
+    "0": "SAFE",
+    "1": "MIXED",
+    "2": "NSFW",
+}
+
+
+def _unescape_aapt_value(raw: str) -> str:
+    if "\\" not in raw:
+        return raw
+    return (
+        raw.replace("\\'", "'")
+        .replace('\\"', '"')
+        .replace("\\\\", "\\")
+    )
+
+
+def _extract_application_label(badging: str, source_meta: dict | None = None) -> str:
+    if isinstance(source_meta, dict):
+        ext_name = source_meta.get("name")
+        if isinstance(ext_name, str) and ext_name:
+            return f"Aniyomi: {ext_name}"
+    label_match = APPLICATION_LABEL_REGEX.search(badging)
+    if label_match:
+        return _unescape_aapt_value(label_match.group(1))
+    meta_name_match = ANIYOMIX_NAME_REGEX.search(badging)
+    if meta_name_match:
+        return f"Aniyomi: {_unescape_aapt_value(meta_name_match.group(1))}"
+    raise ValueError("Unable to extract application label from APK badging")
+
+
+def _extract_content_warning(badging: str, nsfw: int, source_meta: dict | None = None) -> str:
+    if isinstance(source_meta, dict):
+        cw_raw = source_meta.get("contentWarning")
+        if isinstance(cw_raw, int) and cw_raw in CONTENT_WARNING_FROM_PROTO:
+            return CONTENT_WARNING_FROM_PROTO[cw_raw]
+    cw_match = CONTENT_WARNING_REGEX.search(badging)
+    if cw_match and cw_match.group(1) in CONTENT_WARNING_FROM_MANIFEST:
+        return CONTENT_WARNING_FROM_MANIFEST[cw_match.group(1)]
+    return "NSFW" if nsfw == 1 else "SAFE"
 
 REPO_DIR = Path("repo")
 REPO_APK_DIR = REPO_DIR / "apk"
@@ -108,8 +156,20 @@ def create_repo(resolve_sources: bool = False) -> None:
             inspector_data = json.load(f)
 
     index_min_data = []
+    source_meta_by_pkg: dict[str, dict] = {}
+    if SOURCE_INFO_DIR.is_dir():
+        for info_file in sorted(SOURCE_INFO_DIR.glob("*.json")):
+            try:
+                info = json.loads(info_file.read_text(encoding="utf-8"))
+                pkg = info.get("packageName")
+                if pkg:
+                    source_meta_by_pkg[pkg] = info
+            except (OSError, json.JSONDecodeError):
+                pass
 
-    for apk in REPO_APK_DIR.iterdir():
+    for apk in sorted(REPO_APK_DIR.iterdir()):
+        if not apk.is_file() or apk.suffix != ".apk":
+            continue
         badging = _aapt_badging(apk)
 
         package_info = next(x for x in badging.splitlines() if x.startswith("package: "))
@@ -134,14 +194,18 @@ def create_repo(resolve_sources: bool = False) -> None:
             ):
                 language = source_language
 
+        source_meta = source_meta_by_pkg.get(package_name)
+        nsfw = int(IS_NSFW_REGEX.search(badging)[1])
+        content_warning = _extract_content_warning(badging, nsfw, source_meta=source_meta)
         common_data = {
-            "name": APPLICATION_LABEL_REGEX.search(badging)[1],
+            "name": _extract_application_label(badging, source_meta=source_meta),
             "pkg": package_name,
             "apk": apk.name,
             "lang": language,
             "code": int(VERSION_CODE_REGEX.search(package_info)[1]),
             "version": VERSION_NAME_REGEX.search(package_info)[1],
-            "nsfw": int(IS_NSFW_REGEX.search(badging)[1]),
+            "nsfw": nsfw,
+            "contentWarning": content_warning,
         }
         min_data = {
             **common_data,

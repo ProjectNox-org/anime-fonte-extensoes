@@ -95,6 +95,50 @@ class PublishProtobufTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_catalog(self.catalog, self.metadata)
 
+    def test_preserves_safe_mixed_and_nsfw_content_warnings_and_apostrophe_names(self):
+        entries = [
+            {
+                "name": "Aniyomi: SafeSource",
+                "pkg": "eu.kanade.tachiyomi.animeextension.en.safe",
+                "apk": "aniyomi-en.safe-v16.1.apk",
+                "lang": "en",
+                "code": 1,
+                "version": "16.1",
+                "nsfw": 0,
+                "contentWarning": "SAFE",
+                "sources": [{"name": "Safe", "lang": "en", "id": "1", "baseUrl": "https://safe.example"}],
+            },
+            {
+                "name": "Aniyomi: MixedSource",
+                "pkg": "eu.kanade.tachiyomi.animeextension.en.mixed",
+                "apk": "aniyomi-en.mixed-v16.2.apk",
+                "lang": "en",
+                "code": 2,
+                "version": "16.2",
+                "nsfw": 1,
+                "contentWarning": "MIXED",
+                "sources": [{"name": "Mixed", "lang": "en", "id": "2", "baseUrl": "https://mixed.example"}],
+            },
+            {
+                "name": "Aniyomi: Samato's Den: Videos",
+                "pkg": "eu.kanade.tachiyomi.animeextension.es.samatodenvideos",
+                "apk": "aniyomi-es.samatodenvideos-v14.2.apk",
+                "lang": "es",
+                "code": 2,
+                "version": "14.2",
+                "nsfw": 1,
+                "contentWarning": "NSFW",
+                "sources": [{"name": "Samato's Den: Videos", "lang": "es", "id": "3", "baseUrl": "https://samato.example"}],
+            },
+        ]
+        index = index_pb2.Index()
+        index.ParseFromString(gzip.decompress(build_catalog(entries, self.metadata)))
+        by_pkg = {e.packageName: e for e in index.extensionList.extensions}
+        self.assertEqual(by_pkg["eu.kanade.tachiyomi.animeextension.en.safe"].contentWarning, index_pb2.CONTENT_WARNING_SAFE)
+        self.assertEqual(by_pkg["eu.kanade.tachiyomi.animeextension.en.mixed"].contentWarning, index_pb2.CONTENT_WARNING_MIXED)
+        self.assertEqual(by_pkg["eu.kanade.tachiyomi.animeextension.es.samatodenvideos"].contentWarning, index_pb2.CONTENT_WARNING_NSFW)
+        self.assertEqual(by_pkg["eu.kanade.tachiyomi.animeextension.es.samatodenvideos"].name, "Aniyomi: Samato's Den: Videos")
+
 
 if __name__ == "__main__":
     unittest.main()
